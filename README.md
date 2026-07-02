@@ -18,6 +18,8 @@ DASHSCOPE_API_KEY=sk-...
 DASHSCOPE_WORKSPACE_ID=your-workspace-id
 DASHSCOPE_MODEL=qwen3.7-max
 AGENT_USER_ID=default
+AGENT_BACKEND=classic
+AGENT_CHECKPOINT_DB=data/checkpoints.db
 ```
 
 也可以直接设置完整地址：
@@ -27,6 +29,8 @@ DASHSCOPE_BASE_URL=https://your-workspace-id.cn-beijing.maas.aliyuncs.com/compat
 ```
 
 注意：如果 API key 已经在聊天、日志或公开位置暴露，建议立即轮换。
+
+如果要切到第二阶段的 LangGraph 后端，把 `AGENT_BACKEND` 改成 `langgraph`。这时线程内短期记忆会走 LangGraph checkpoint，长期记忆仍然继续使用现有 SQLite store。
 
 ## 安装与运行
 
@@ -71,6 +75,7 @@ agent-doctor --online
 - 纠错：`/memories` 会显示记忆 id，可用 `/forget <id>` 删除当前用户下的错误记忆。
 - 自我进化：`agent_profile` 保存身份、风格和边界，只在学习步骤明确返回更新时变化。
 - 学习事件：每轮学习会记录写入记忆数量和 profile 更新字段，便于用 `/learning` 审计变化。
+- LangGraph 后端：通过 `AGENT_BACKEND=langgraph` 启用，短期记忆走 `AGENT_CHECKPOINT_DB`，长期记忆继续复用 SQLite。
 
 ## 测试
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+from langchain_openai import ChatOpenAI
 from openai import OpenAI
 
 from .config import AgentConfig
@@ -23,3 +24,17 @@ class QwenClient:
 
     def ping(self) -> str:
         return self.chat([{"role": "user", "content": "ping"}], temperature=0.0)
+
+
+class LangChainQwenClient:
+    def __init__(self, config: AgentConfig) -> None:
+        self.config = config
+        self.client = ChatOpenAI(
+            api_key=config.api_key,
+            base_url=config.base_url,
+            model=config.model,
+            temperature=0.7,
+        )
+
+    def invoke(self, messages):
+        return self.client.invoke(messages)

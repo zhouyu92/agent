@@ -13,8 +13,10 @@ class AgentConfig:
     base_url: str
     model: str = "qwen3.7-max"
     memory_db_path: Path = Path("data/agent.db")
+    checkpoint_db_path: Path = Path("data/checkpoints.db")
     max_recent_turns: int = 8
     user_id: str = "default"
+    backend: str = "classic"
 
     @classmethod
     def from_env(cls) -> "AgentConfig":
@@ -36,6 +38,8 @@ class AgentConfig:
             base_url=base_url.rstrip("/"),
             model=os.getenv("DASHSCOPE_MODEL", "qwen3.7-max"),
             memory_db_path=Path(os.getenv("AGENT_MEMORY_DB", "data/agent.db")),
+            checkpoint_db_path=Path(os.getenv("AGENT_CHECKPOINT_DB", "data/checkpoints.db")),
             max_recent_turns=int(os.getenv("AGENT_MAX_RECENT_TURNS", "8")),
             user_id=os.getenv("AGENT_USER_ID", "default"),
+            backend=os.getenv("AGENT_BACKEND", "classic"),
         )
