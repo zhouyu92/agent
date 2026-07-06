@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from .memory_evolution import choose_evolution_action
 from .semantic_memory import is_similar_memory, memory_terms, query_terms, score_memory_match
 from .semantic_memory_repository import SqliteSemanticMemoryRepository
 from .storage_utils import looks_sensitive, now_iso
@@ -109,7 +110,17 @@ class SqliteSemanticMemoryStore:
                 reason="new_memory",
             )
 
-        if self._looks_like_correction(normalized_content):
+        action, reason = choose_evolution_action(normalized_content, matched_row["content"])
+        if action == "ignore":
+            return MemoryEvolutionResult(
+                action="ignore",
+                candidate_category=normalized_category,
+                candidate_content=normalized_content,
+                target_memory_id=matched_row["id"],
+                result_memory_id=None,
+                reason=reason,
+            )
+        if action == "revise":
             self.repository.mark_memory_superseded(matched_row["id"], user_id=user_id)
             memory_id = self.repository.insert_revision_memory(
                 user_id=user_id,
@@ -126,7 +137,7 @@ class SqliteSemanticMemoryStore:
                 candidate_content=normalized_content,
                 target_memory_id=matched_row["id"],
                 result_memory_id=memory_id,
-                reason="correction_phrase",
+                reason=reason,
             )
 
         self.repository.reinforce_memory(matched_row["id"], user_id=user_id, created_at=now_iso())
@@ -136,7 +147,7 @@ class SqliteSemanticMemoryStore:
             candidate_content=normalized_content,
             target_memory_id=matched_row["id"],
             result_memory_id=matched_row["id"],
-            reason="confirmed_existing_memory",
+            reason=reason,
         )
 
     def recent_memories(self, limit: int = 10, user_id: str = "default") -> list["MemoryItem"]:
@@ -201,8 +212,3 @@ class SqliteSemanticMemoryStore:
             if overlap >= 1:
                 return row
         return None
-
-    @staticmethod
-    def _looks_like_correction(text: str) -> bool:
-        markers = ("不是", "而是", "改成", "更准确地说", "实际上", "以后以", "以后回答")
-        return any(marker in text for marker in markers)

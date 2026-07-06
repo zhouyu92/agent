@@ -161,6 +161,34 @@ def test_evolve_memory_ignores_low_value_candidate(tmp_path):
     assert store.recent_memories(user_id="alice", limit=10) == []
 
 
+def test_evolve_memory_ignores_identical_candidate(tmp_path):
+    store = MemoryStore(tmp_path / "agent.db")
+    repository = store.semantic_store.repository
+    repository.insert_memory(
+        user_id="alice",
+        category="preference",
+        content="用户喜欢先给结论。",
+        importance=3,
+        source="conversation",
+        created_at="2026-07-06T00:00:00+00:00",
+    )
+    memory_id = store.recent_memories(user_id="alice", limit=1)[0].id
+
+    result = store.semantic_store.evolve_memory(
+        category="preference",
+        content="用户喜欢先给结论。",
+        importance=3,
+        source="conversation",
+        user_id="alice",
+    )
+
+    assert result.action == "ignore"
+    assert result.reason == "no_new_information"
+    assert result.target_memory_id == memory_id
+    assert result.result_memory_id is None
+    assert len(store.recent_memories(user_id="alice", limit=10)) == 1
+
+
 def test_search_memories_excludes_superseded_items(tmp_path):
     store = MemoryStore(tmp_path / "agent.db")
     repository = store.semantic_store.repository
