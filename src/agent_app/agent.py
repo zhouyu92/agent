@@ -60,14 +60,15 @@ class ConversationalAgent:
         update = parse_learning_update(raw)
         saved_memory_count = 0
         for item in update.memories:
-            saved = self.memory.add_memory(
+            saved = self.memory.evolve_memory(
                 category=item.category,
                 content=item.content,
                 importance=item.importance,
                 source="conversation",
                 user_id=user_id,
+                thread_id=thread_id,
             )
-            if saved:
+            if saved.action != "ignore":
                 saved_memory_count += 1
         allowed = {"identity", "style_notes", "boundaries"}
         profile_updates = {key: value for key, value in update.profile_updates.items() if key in allowed}

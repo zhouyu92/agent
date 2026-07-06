@@ -1,6 +1,6 @@
 from agent_app.agent import ConversationalAgent, parse_learning_update
 from agent_app.config import AgentConfig
-from agent_app.memory import MemoryStore
+from agent_app.memory import MemoryEvolutionResult, MemoryStore
 
 
 class FakeModel:
@@ -131,7 +131,7 @@ def test_agent_records_learning_event_after_reply(tmp_path):
     assert events[0].profile_fields == ["style_notes"]
 
 
-def test_agent_learning_event_counts_only_saved_memories(tmp_path):
+def test_agent_learning_event_counts_non_ignored_memory_evolution(tmp_path):
     config = AgentConfig(
         api_key="test-key",
         base_url="https://example.test/compatible-mode/v1",
@@ -150,4 +150,55 @@ def test_agent_learning_event_counts_only_saved_memories(tmp_path):
     agent.reply("继续按我的偏好回答。", thread_id="t1", user_id="alice")
 
     events = memory.recent_learning_events(user_id="alice", limit=1)
-    assert events[0].memory_count == 0
+    assert events[0].memory_count == 1
+
+
+def test_conversational_agent_learn_from_turn_uses_evolve_memory(tmp_path):
+    class TrackingMemoryStore(MemoryStore):
+        def __init__(self, db_path):
+            super().__init__(db_path)
+            self.evolve_calls = []
+
+        def evolve_memory(self, *, category, content, importance, source, user_id="default", thread_id=None):
+            self.evolve_calls.append((category, content, importance, source, user_id, thread_id))
+            return MemoryEvolutionResult(
+                action="add",
+                candidate_category=category,
+                candidate_content=content,
+                target_memory_id=None,
+                result_memory_id=1,
+                reason="new_memory",
+            )
+
+    config = AgentConfig(
+        api_key="test-key",
+        base_url="https://example.test/compatible-mode/v1",
+        memory_db_path=tmp_path / "agent.db",
+    )
+    memory = TrackingMemoryStore(config.memory_db_path)
+    model = FakeModel()
+    agent = ConversationalAgent(config, memory, model)
+
+    agent.reply("以后回答先给结论。", thread_id="t1", user_id="alice")
+
+    assert memory.evolve_calls == [
+        ("preference", "用户喜欢先给结论再解释。", 4, "conversation", "alice", "t1")
+    ]
+
+
+def test_agent_records_memory_evolution_event_after_reply(tmp_path):
+    config = AgentConfig(
+        api_key="test-key",
+        base_url="https://example.test/compatible-mode/v1",
+        memory_db_path=tmp_path / "agent.db",
+    )
+    memory = MemoryStore(config.memory_db_path)
+    model = FakeModel()
+    agent = ConversationalAgent(config, memory, model)
+
+    agent.reply("以后回答先给结论。", thread_id="t-evolution", user_id="alice")
+
+    event = memory.recent_memory_evolution_events(user_id="alice", limit=1, thread_id="t-evolution")[0]
+    assert event.action == "add"
+    assert event.candidate_category == "preference"
+    assert event.result_memory_id is not None
