@@ -10,8 +10,10 @@ from agent_app.cli import (
     format_thread_inspection,
     format_memory_evolution_events,
     format_learning_events,
+    format_reflection_events,
     main,
     parse_learning_query,
+    parse_reflection_query,
     parse_memory_evolution_log_query,
     parse_dedupe_log_query,
     parse_dedupe_query,
@@ -27,7 +29,8 @@ from agent_app.agent import ConversationalAgent
 from agent_app.bootstrap import build_runtime
 from agent_app.config import AgentConfig
 from agent_app.langgraph_agent import LangGraphAgent
-from agent_app.memory import AgentProfile, DedupeEvent, DedupeResult, LearningEvent, MemoryEvolutionEvent, MemoryItem, RetrievalEvent, RoutingEvent, ThreadMessage
+from agent_app.memory import AgentProfile, DedupeEvent, DedupeResult, LearningEvent, MemoryEvolutionEvent, MemoryItem, ReflectionEvent, RetrievalEvent, RoutingEvent, ThreadMessage
+from agent_app.reflection import ReflectionRunResult
 from agent_app.runtime_agent import ConversationRuntime, ThreadInspection, ThreadInspectionRuntime
 from agent_app.store import (
     SqliteAuditStore,
@@ -215,7 +218,7 @@ def test_main_help_shows_memory_filter_syntax(monkeypatch, capsys):
     ) in output
     assert "/dedupe-memories [thread=<thread_id>]" in output
     assert "/dedupe-log [thread=<thread_id>] [limit=<n>]" in output
-    assert "/memory-log [thread=<thread_id>] [action=<add|reinforce|revise|ignore>] [reason=<name>] [limit=<n>]" in output
+    assert "/memory-log [thread=<thread_id>] [action=<add|reinforce|revise|ignore|restore>] [reason=<name>] [limit=<n>]" in output
     assert "/learning [thread=<thread_id>] [outcome=<memory+profile|memory_only|profile_only|no_change>] [limit=<n>]" in output
     assert "/routing [thread=<thread_id>] [learn=<true|false>] [retrieve=<true|false>] [reason=<name>] [limit=<n>] [text]" in output
     assert "/memory-hygiene [category=<name>] [days=<n>] [limit=<n>]" in output
@@ -223,6 +226,7 @@ def test_main_help_shows_memory_filter_syntax(monkeypatch, capsys):
     assert "/confirm-stale [category=<name>] [days=<n>] [limit=<n>]" in output
     assert "/forget-stale [category=<name>] [days=<n>] [limit=<n>]" in output
     assert "/archive-stale [category=<name>] [days=<n>] [limit=<n>]" in output
+    assert "/reflect [thread_id]" in output
     assert "dry_run=<true|false>" in output
 
 
@@ -294,6 +298,105 @@ def test_main_rejects_invalid_confirm_memory_usage(monkeypatch, capsys):
 
     output = capsys.readouterr().out
     assert "Usage: /confirm-memory <memory_id>" in output
+
+
+def test_main_restores_archived_memory(monkeypatch, capsys):
+    class FakeAgent:
+        def close(self):
+            return None
+
+    class FakeCliStore:
+        def __init__(self):
+            self.calls = []
+
+        def restore_memory(self, memory_id: int, user_id: str):
+            self.calls.append((memory_id, user_id))
+            return True
+
+    class FakeRuntime:
+        def __init__(self, cli_store):
+            self.agent = FakeAgent()
+            self.cli_store = cli_store
+
+    fake_store = FakeCliStore()
+    config = AgentConfig(
+        api_key="test-key",
+        base_url="https://example.test/compatible-mode/v1",
+        backend="classic",
+        user_id="alice",
+    )
+    monkeypatch.setattr("agent_app.cli.AgentConfig.from_env", lambda: config)
+    monkeypatch.setattr("agent_app.cli.build_runtime", lambda _: FakeRuntime(fake_store))
+    inputs = iter(["/restore-memory 7", "/exit"])
+    monkeypatch.setattr("builtins.input", lambda _: next(inputs))
+
+    main()
+
+    output = capsys.readouterr().out
+    assert fake_store.calls == [(7, "alice")]
+    assert "Memory restored." in output
+
+
+def test_main_runs_reflection_for_requested_thread(monkeypatch, capsys):
+    class FakeAgent:
+        def __init__(self):
+            self.calls = []
+
+        def reflect(self, thread_id: str, user_id: str):
+            self.calls.append((thread_id, user_id))
+            return ReflectionRunResult(status="completed", source_event_ids=[1, 2], memory_count=1, profile_fields=["style_notes"])
+
+        def close(self):
+            return None
+
+    class FakeRuntime:
+        def __init__(self, agent):
+            self.agent = agent
+            self.cli_store = object()
+
+    agent = FakeAgent()
+    config = AgentConfig(api_key="test-key", base_url="https://example.test/compatible-mode/v1", backend="classic", user_id="alice")
+    monkeypatch.setattr("agent_app.cli.AgentConfig.from_env", lambda: config)
+    monkeypatch.setattr("agent_app.cli.build_runtime", lambda _: FakeRuntime(agent))
+    inputs = iter(["/reflect t1", "/exit"])
+    monkeypatch.setattr("builtins.input", lambda _: next(inputs))
+
+    main()
+
+    output = capsys.readouterr().out
+    assert agent.calls == [("t1", "alice")]
+    assert "Reflection completed for 2 episodes: 1 memory updates, 1 profile updates." in output
+
+
+def test_main_rejects_invalid_restore_memory_usage(monkeypatch, capsys):
+    class FakeAgent:
+        def close(self):
+            return None
+
+    class FakeCliStore:
+        def restore_memory(self, memory_id: int, user_id: str):
+            raise AssertionError("restore_memory should not be called for invalid usage")
+
+    class FakeRuntime:
+        def __init__(self, cli_store):
+            self.agent = FakeAgent()
+            self.cli_store = cli_store
+
+    config = AgentConfig(
+        api_key="test-key",
+        base_url="https://example.test/compatible-mode/v1",
+        backend="classic",
+        user_id="alice",
+    )
+    monkeypatch.setattr("agent_app.cli.AgentConfig.from_env", lambda: config)
+    monkeypatch.setattr("agent_app.cli.build_runtime", lambda _: FakeRuntime(FakeCliStore()))
+    inputs = iter(["/restore-memory abc", "/exit"])
+    monkeypatch.setattr("builtins.input", lambda _: next(inputs))
+
+    main()
+
+    output = capsys.readouterr().out
+    assert "Usage: /restore-memory <memory_id>" in output
 
 
 def test_main_confirms_stale_memories(monkeypatch, capsys):
@@ -1337,7 +1440,7 @@ def test_main_rejects_invalid_memory_log_filter(monkeypatch, capsys):
     main()
 
     output = capsys.readouterr().out
-    assert "Usage: /memory-log [thread=<thread_id>] [action=<add|reinforce|revise|ignore>] [reason=<name>] [limit=<n>]" in output
+    assert "Usage: /memory-log [thread=<thread_id>] [action=<add|reinforce|revise|ignore|restore>] [reason=<name>] [limit=<n>]" in output
 
 
 def test_main_shows_recent_dedupe_events(monkeypatch, capsys):
@@ -1991,7 +2094,14 @@ def test_parse_memory_evolution_log_query_rejects_unknown_action():
     filters, error = parse_memory_evolution_log_query("action=archive")
 
     assert filters == {}
-    assert error == "Usage: /memory-log [thread=<thread_id>] [action=<add|reinforce|revise|ignore>] [reason=<name>] [limit=<n>]"
+    assert error == "Usage: /memory-log [thread=<thread_id>] [action=<add|reinforce|revise|ignore|restore>] [reason=<name>] [limit=<n>]"
+
+
+def test_parse_memory_evolution_log_query_accepts_restore_action():
+    filters, error = parse_memory_evolution_log_query("action=restore")
+
+    assert error is None
+    assert filters == {"action": "restore"}
 
 
 def test_main_shows_recent_memory_evolution_events_with_reason_filter(monkeypatch, capsys):
@@ -2168,6 +2278,35 @@ def test_format_learning_events_marks_no_change_outcome():
     assert "memories=0" in text
     assert "outcome=no_change" in text
     assert "profile=none" in text
+
+
+def test_format_reflection_events_lists_episode_ids_and_summary():
+    text = format_reflection_events(
+        [
+            ReflectionEvent(
+                id=1,
+                user_id="alice",
+                thread_id="t1",
+                source_event_ids=[3, 4],
+                summary="用户稳定偏好先给结论。",
+                memory_count=1,
+                profile_fields=["style_notes"],
+                created_at="2026-07-10T00:00:00+00:00",
+            )
+        ]
+    )
+
+    assert "thread=t1" in text
+    assert "episodes=3,4" in text
+    assert "memories=1" in text
+    assert "用户稳定偏好先给结论。" in text
+
+
+def test_parse_reflection_query_accepts_thread_and_limit():
+    filters, error = parse_reflection_query("thread=t1 limit=3")
+
+    assert error is None
+    assert filters == {"thread_id": "t1", "limit": 3}
 
 
 def test_format_routing_events_shows_empty_state():
@@ -2528,6 +2667,74 @@ def test_format_audit_timeline_shows_memory_evolution_candidate_preview():
     assert "category=preference" in text
     assert "candidate=用户偏好回答时先给结论，再补充原因。" in text
     assert "reason=no_new_information" in text
+
+
+def test_format_audit_timeline_shows_reflection_event():
+    text = format_audit_timeline(
+        "t10",
+        messages=[],
+        routing_events=[],
+        retrieval_events=[],
+        learning_events=[],
+        dedupe_events=[],
+        reflection_events=[
+            ReflectionEvent(
+                id=1,
+                user_id="alice",
+                thread_id="t10",
+                source_event_ids=[1, 2],
+                summary="用户稳定偏好先给结论。",
+                memory_count=1,
+                profile_fields=[],
+                created_at="2026-07-10T00:00:00+00:00",
+            )
+        ],
+    )
+
+    assert "reflection episodes=1,2 memories=1 profile=none" in text
+
+
+def test_main_lists_reflection_events(monkeypatch, capsys):
+    class FakeAgent:
+        def close(self):
+            return None
+
+    class FakeCliStore:
+        def __init__(self):
+            self.calls = []
+
+        def recent_reflection_events(self, user_id: str, limit: int, thread_id: str | None = None):
+            self.calls.append((user_id, limit, thread_id))
+            return [
+                ReflectionEvent(
+                    id=1,
+                    user_id=user_id,
+                    thread_id="t1",
+                    source_event_ids=[1, 2],
+                    summary="用户稳定偏好先给结论。",
+                    memory_count=1,
+                    profile_fields=[],
+                    created_at="2026-07-10T00:00:00+00:00",
+                )
+            ]
+
+    class FakeRuntime:
+        def __init__(self, cli_store):
+            self.agent = FakeAgent()
+            self.cli_store = cli_store
+
+    store = FakeCliStore()
+    config = AgentConfig(api_key="test-key", base_url="https://example.test/compatible-mode/v1", user_id="alice")
+    monkeypatch.setattr("agent_app.cli.AgentConfig.from_env", lambda: config)
+    monkeypatch.setattr("agent_app.cli.build_runtime", lambda _: FakeRuntime(store))
+    inputs = iter(["/reflections thread=t1 limit=3", "/exit"])
+    monkeypatch.setattr("builtins.input", lambda _: next(inputs))
+
+    main()
+
+    output = capsys.readouterr().out
+    assert store.calls == [("alice", 3, "t1")]
+    assert "episodes=1,2" in output
 
 
 def test_format_checkpoint_messages_shows_checkpoint_state_separately():

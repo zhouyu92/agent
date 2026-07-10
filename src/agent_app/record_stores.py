@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 from .sqlite_records import SqliteAuditRepository, SqliteProfileRepository, SqliteTranscriptRepository
 
 if TYPE_CHECKING:
-    from .memory import AgentProfile, DedupeEvent, LearningEvent, MemoryEvolutionEvent, RetrievalEvent, RoutingEvent, ThreadMessage
+    from .memory import AgentProfile, DedupeEvent, LearningEvent, MemoryEvolutionEvent, ReflectionEvent, RetrievalEvent, RoutingEvent, ThreadMessage
 
 
 class SqliteProfileStore:
@@ -59,6 +59,34 @@ class SqliteAuditStore:
         thread_id: str | None = None,
     ) -> list["LearningEvent"]:
         return self.repository.recent_learning_events(user_id=user_id, limit=limit, thread_id=thread_id)
+
+    def add_reflection_event(
+        self,
+        *,
+        user_id: str,
+        thread_id: str,
+        source_event_ids: list[int],
+        summary: str,
+        memory_count: int,
+        profile_fields: list[str],
+    ) -> None:
+        self.repository.add_reflection_event(
+            user_id=user_id,
+            thread_id=thread_id,
+            source_event_ids=source_event_ids,
+            summary=summary,
+            memory_count=memory_count,
+            profile_fields=profile_fields,
+        )
+
+    def recent_reflection_events(
+        self,
+        user_id: str = "default",
+        limit: int = 10,
+        *,
+        thread_id: str | None = None,
+    ) -> list["ReflectionEvent"]:
+        return self.repository.recent_reflection_events(user_id=user_id, limit=limit, thread_id=thread_id)
 
     def add_routing_event(
         self,

@@ -19,6 +19,7 @@ DASHSCOPE_WORKSPACE_ID=your-workspace-id
 DASHSCOPE_MODEL=qwen3.7-max
 AGENT_USER_ID=default
 AGENT_BACKEND=classic
+AGENT_REFLECTION_INTERVAL=0
 AGENT_CHECKPOINT_DB=data/checkpoints.db
 EMBEDDING_MODEL=text-embedding-v4
 EMBEDDING_DIMENSION=1024
@@ -36,6 +37,8 @@ DASHSCOPE_BASE_URL=https://your-workspace-id.cn-beijing.maas.aliyuncs.com/compat
 注意：如果 API key 已经在聊天、日志或公开位置暴露，建议立即轮换。
 
 Zilliz token 同样只通过环境变量读取，不要写入代码或提交到仓库。Embedding 只计划用于长期记忆检索和相似记忆匹配；`add / reinforce / revise / ignore` 的演化决策仍由本地规则层负责。
+
+`AGENT_REFLECTION_INTERVAL` 默认为 `0`，即只通过 `/reflect <thread_id>` 显式触发跨轮反思。设为大于等于 `2` 的整数后，同一线程每积累到该数量的未反思学习事件会自动执行一次反思。
 
 如果要切到第二阶段的 LangGraph 后端，把 `AGENT_BACKEND` 改成 `langgraph`。这时线程内短期记忆会走 LangGraph checkpoint，长期记忆会先通过 `LongTermStore` 适配层接入现有 SQLite store。
 

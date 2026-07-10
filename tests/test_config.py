@@ -11,6 +11,7 @@ def test_config_builds_beijing_base_url_from_workspace_id(monkeypatch):
     monkeypatch.setenv("AGENT_USER_ID", "alice")
     monkeypatch.setenv("AGENT_BACKEND", "langgraph")
     monkeypatch.setenv("AGENT_CHECKPOINT_DB", "data/lg-checkpoints.db")
+    monkeypatch.setenv("AGENT_REFLECTION_INTERVAL", "3")
     monkeypatch.delenv("DASHSCOPE_BASE_URL", raising=False)
 
     config = AgentConfig.from_env()
@@ -21,6 +22,17 @@ def test_config_builds_beijing_base_url_from_workspace_id(monkeypatch):
     assert config.user_id == "alice"
     assert config.backend == "langgraph"
     assert str(config.checkpoint_db_path).endswith("data\\lg-checkpoints.db")
+    assert config.reflection_interval == 3
+
+
+def test_config_rejects_reflection_interval_of_one(monkeypatch):
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "test-key")
+    monkeypatch.setenv("DASHSCOPE_WORKSPACE_ID", "ws-123")
+    monkeypatch.setenv("AGENT_REFLECTION_INTERVAL", "1")
+    monkeypatch.delenv("DASHSCOPE_BASE_URL", raising=False)
+
+    with pytest.raises(ValueError, match="AGENT_REFLECTION_INTERVAL"):
+        AgentConfig.from_env()
 
 
 def test_config_reads_embedding_and_zilliz_settings(monkeypatch):

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .memory import DedupeEvent, LearningEvent, MemoryEvolutionEvent, RetrievalEvent, RoutingEvent, ThreadMessage
+from .memory import DedupeEvent, LearningEvent, MemoryEvolutionEvent, ReflectionEvent, RetrievalEvent, RoutingEvent, ThreadMessage
 from .runtime_agent import ThreadInspection
 
 
@@ -12,8 +12,10 @@ def format_audit_timeline(
     learning_events: list[LearningEvent],
     dedupe_events: list[DedupeEvent],
     memory_evolution_events: list[MemoryEvolutionEvent] | None = None,
+    reflection_events: list[ReflectionEvent] | None = None,
 ) -> str:
     memory_evolution_events = memory_evolution_events or []
+    reflection_events = reflection_events or []
     timeline: list[tuple[str, str, str]] = []
     for message in messages:
         preview = message.content.replace("\n", " ")[:60]
@@ -80,6 +82,19 @@ def format_audit_timeline(
                 f"memory_evolution {event.action} category={event.candidate_category} "
                 f"target={target_memory_id} result={result_memory_id} reason={event.reason} "
                 f"candidate={candidate_preview}",
+            )
+        )
+    for event in reflection_events:
+        if event.thread_id != thread_id:
+            continue
+        source_ids = ",".join(str(event_id) for event_id in event.source_event_ids) or "none"
+        fields = ",".join(event.profile_fields) if event.profile_fields else "none"
+        summary = event.summary.replace("\n", " ")[:80]
+        timeline.append(
+            (
+                event.created_at,
+                "reflection",
+                f"reflection episodes={source_ids} memories={event.memory_count} profile={fields} summary={summary}",
             )
         )
 
@@ -246,6 +261,7 @@ def format_thread_inspection(inspection: ThreadInspection) -> str:
             inspection.learning_events,
             inspection.dedupe_events,
             inspection.memory_evolution_events,
+            inspection.reflection_events,
         ),
         format_checkpoint_messages(
             inspection.thread_id,

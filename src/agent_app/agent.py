@@ -9,6 +9,8 @@ from .config import AgentConfig
 from .memory import MemoryStore
 from .policies import TurnRoutingPolicy
 from .prompts import LEARNING_PROMPT, build_system_prompt
+from .reflection import ReflectionRunResult, run_reflection
+from .semantic_memory import normalize_memory_category
 
 
 class ChatModel(Protocol):
@@ -113,6 +115,34 @@ class ConversationalAgent:
             profile_fields=sorted(profile_updates),
         )
 
+        if self.config.reflection_interval >= 2:
+            self.reflect(thread_id=thread_id, user_id=user_id, min_episode_count=self.config.reflection_interval)
+
+    def reflect(
+        self,
+        thread_id: str = "default",
+        user_id: str = "default",
+        min_episode_count: int = 2,
+    ) -> ReflectionRunResult:
+        return run_reflection(
+            audit_store=self.memory,
+            evolve_memory=lambda category, content, importance: self.memory.evolve_memory(
+                category=category,
+                content=content,
+                importance=importance,
+                source="reflection",
+                user_id=user_id,
+                thread_id=thread_id,
+            ),
+            update_profile=self.memory.update_profile,
+            model_call=lambda system, episodes: self.model.chat(
+                [{"role": "system", "content": system}, {"role": "user", "content": episodes}], temperature=0.0
+            ),
+            user_id=user_id,
+            thread_id=thread_id,
+            min_episode_count=min_episode_count,
+        )
+
 
 def parse_learning_update(raw: str) -> LearningUpdate:
     try:
@@ -126,7 +156,7 @@ def parse_learning_update(raw: str) -> LearningUpdate:
             continue
         memories.append(
             LearnedMemory(
-                category=str(item.get("category", "general")).strip() or "general",
+                category=normalize_memory_category(str(item.get("category", "general"))),
                 content=content,
                 importance=int(item.get("importance", 3)),
             )

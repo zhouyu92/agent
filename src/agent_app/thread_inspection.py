@@ -17,6 +17,7 @@ class LangGraphThreadInspectionBuilder:
             routing_events=self.cli_store.recent_routing_events(user_id=user_id, limit=20, thread_id=thread_id),
             retrieval_events=self.cli_store.recent_retrieval_events(user_id=user_id, limit=20, thread_id=thread_id),
             learning_events=self.cli_store.recent_learning_events(user_id=user_id, limit=20, thread_id=thread_id),
+            reflection_events=self.cli_store.recent_reflection_events(user_id=user_id, limit=20, thread_id=thread_id),
             dedupe_events=self.cli_store.recent_dedupe_events(user_id=user_id, limit=20, thread_id=thread_id),
             memory_evolution_events=self.cli_store.recent_memory_evolution_events(
                 user_id=user_id, limit=20, thread_id=thread_id

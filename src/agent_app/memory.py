@@ -48,6 +48,18 @@ class LearningEvent:
 
 
 @dataclass(frozen=True)
+class ReflectionEvent:
+    id: int
+    user_id: str
+    thread_id: str
+    source_event_ids: list[int]
+    summary: str
+    memory_count: int
+    profile_fields: list[str]
+    created_at: str
+
+
+@dataclass(frozen=True)
 class RoutingEvent:
     id: int
     user_id: str
@@ -204,6 +216,25 @@ class MemoryStore:
     def archive_memory(self, memory_id: int, user_id: str = "default") -> bool:
         return self.semantic_store.archive_memory(memory_id, user_id=user_id)
 
+    def restore_memory(self, memory_id: int, user_id: str = "default") -> bool:
+        row = self.semantic_store.repository.archived_memory_by_id(user_id, memory_id)
+        if row is None:
+            return False
+        restored = self.semantic_store.restore_memory(memory_id, user_id=user_id)
+        if not restored:
+            return False
+        self.add_memory_evolution_event(
+            user_id=user_id,
+            thread_id=None,
+            action="restore",
+            candidate_category=row["category"],
+            candidate_content=row["content"],
+            target_memory_id=memory_id,
+            result_memory_id=memory_id,
+            reason="manual_restore",
+        )
+        return True
+
     def confirm_memory(self, memory_id: int, user_id: str = "default") -> bool:
         row = self.semantic_store.repository.active_memory_by_id(user_id, memory_id)
         if row is None:
@@ -261,6 +292,34 @@ class MemoryStore:
         thread_id: str | None = None,
     ) -> list[LearningEvent]:
         return self.audit_store.recent_learning_events(user_id=user_id, limit=limit, thread_id=thread_id)
+
+    def add_reflection_event(
+        self,
+        *,
+        user_id: str,
+        thread_id: str,
+        source_event_ids: list[int],
+        summary: str,
+        memory_count: int,
+        profile_fields: list[str],
+    ) -> None:
+        self.audit_store.add_reflection_event(
+            user_id=user_id,
+            thread_id=thread_id,
+            source_event_ids=source_event_ids,
+            summary=summary,
+            memory_count=memory_count,
+            profile_fields=profile_fields,
+        )
+
+    def recent_reflection_events(
+        self,
+        user_id: str = "default",
+        limit: int = 10,
+        *,
+        thread_id: str | None = None,
+    ) -> list[ReflectionEvent]:
+        return self.audit_store.recent_reflection_events(user_id=user_id, limit=limit, thread_id=thread_id)
 
     def add_routing_event(
         self,

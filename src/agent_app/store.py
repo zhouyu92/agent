@@ -12,6 +12,7 @@ from .memory import (
     MemoryEvolutionEvent,
     MemoryItem,
     MemoryStore,
+    ReflectionEvent,
     RetrievalEvent,
     RoutingEvent,
     ThreadMessage,
@@ -91,6 +92,27 @@ class AuditStore(Protocol):
         should_learn: bool,
         learn_reason: str,
     ) -> None:
+        ...
+
+    def add_reflection_event(
+        self,
+        *,
+        user_id: str,
+        thread_id: str,
+        source_event_ids: list[int],
+        summary: str,
+        memory_count: int,
+        profile_fields: list[str],
+    ) -> None:
+        ...
+
+    def recent_reflection_events(
+        self,
+        user_id: str = "default",
+        limit: int = 10,
+        *,
+        thread_id: str | None = None,
+    ) -> list[ReflectionEvent]:
         ...
 
     def add_retrieval_event(
@@ -290,6 +312,34 @@ class SqliteLongTermStore:
             learn_reason=learn_reason,
         )
 
+    def add_reflection_event(
+        self,
+        *,
+        user_id: str,
+        thread_id: str,
+        source_event_ids: list[int],
+        summary: str,
+        memory_count: int,
+        profile_fields: list[str],
+    ) -> None:
+        self.audit_store.add_reflection_event(
+            user_id=user_id,
+            thread_id=thread_id,
+            source_event_ids=source_event_ids,
+            summary=summary,
+            memory_count=memory_count,
+            profile_fields=profile_fields,
+        )
+
+    def recent_reflection_events(
+        self,
+        user_id: str = "default",
+        limit: int = 10,
+        *,
+        thread_id: str | None = None,
+    ) -> list[ReflectionEvent]:
+        return self.audit_store.recent_reflection_events(user_id=user_id, limit=limit, thread_id=thread_id)
+
     def add_retrieval_event(
         self,
         *,
@@ -405,6 +455,25 @@ class SqliteCliStore:
     def archive_memory(self, memory_id: int, user_id: str = "default") -> bool:
         return self.long_term_store.semantic_memory_store.archive_memory(memory_id, user_id=user_id)
 
+    def restore_memory(self, memory_id: int, user_id: str = "default") -> bool:
+        row = self.long_term_store.semantic_memory_store.repository.archived_memory_by_id(user_id, memory_id)
+        if row is None:
+            return False
+        restored = self.long_term_store.semantic_memory_store.restore_memory(memory_id, user_id=user_id)
+        if not restored:
+            return False
+        self.long_term_store.audit_store.add_memory_evolution_event(
+            user_id=user_id,
+            thread_id=None,
+            action="restore",
+            candidate_category=row["category"],
+            candidate_content=row["content"],
+            target_memory_id=memory_id,
+            result_memory_id=memory_id,
+            reason="manual_restore",
+        )
+        return True
+
     def confirm_memory(self, memory_id: int, user_id: str = "default") -> bool:
         row = self.long_term_store.semantic_memory_store.repository.active_memory_by_id(user_id, memory_id)
         if row is None:
@@ -440,6 +509,15 @@ class SqliteCliStore:
             limit=limit,
             thread_id=thread_id,
         )
+
+    def recent_reflection_events(
+        self,
+        user_id: str = "default",
+        limit: int = 10,
+        *,
+        thread_id: str | None = None,
+    ) -> list[ReflectionEvent]:
+        return self.long_term_store.recent_reflection_events(user_id=user_id, limit=limit, thread_id=thread_id)
 
     def recent_routing_events(
         self,

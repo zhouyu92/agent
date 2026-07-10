@@ -45,6 +45,21 @@ class DuplicateMemoryModel:
         return "好的。"
 
 
+class ReflectionModel:
+    def __init__(self):
+        self.calls = []
+
+    def chat(self, messages, temperature=0.7):
+        self.calls.append((messages, temperature))
+        return """
+        {
+          "summary": "用户在多轮对话中稳定偏好先给结论。",
+          "memories": [{"category": "preference", "content": "用户喜欢先给结论再解释。", "importance": 4}],
+          "profile_updates": {"style_notes": "回答时先给结论。"}
+        }
+        """
+
+
 def test_parse_learning_update_accepts_json_inside_markdown_fence():
     raw = """
     ```json
@@ -94,6 +109,52 @@ def test_agent_learns_after_reply_and_uses_memory_next_turn(tmp_path):
     assert memory.search_memories("回答偏好", limit=1)[0].content == "用户喜欢先给结论再解释。"
     second_chat_messages = model.calls[2]["messages"]
     assert "用户喜欢先给结论再解释。" in second_chat_messages[0]["content"]
+
+
+def test_agent_reflects_unreviewed_learning_events_once(tmp_path):
+    config = AgentConfig(
+        api_key="test-key",
+        base_url="https://example.test/compatible-mode/v1",
+        memory_db_path=tmp_path / "agent.db",
+    )
+    memory = MemoryStore(config.memory_db_path)
+    memory.add_learning_event(
+        user_id="alice", thread_id="t1", user_text="以后先给结论。", assistant_text="好。", memory_count=1, profile_fields=[]
+    )
+    memory.add_learning_event(
+        user_id="alice", thread_id="t1", user_text="还是先给结论。", assistant_text="明白。", memory_count=1, profile_fields=[]
+    )
+    model = ReflectionModel()
+    agent = ConversationalAgent(config, memory, model)
+
+    result = agent.reflect(thread_id="t1", user_id="alice")
+    repeated = agent.reflect(thread_id="t1", user_id="alice")
+
+    assert result.status == "completed"
+    assert result.source_event_ids == [1, 2]
+    assert result.memory_count == 1
+    assert memory.recent_reflection_events(user_id="alice", limit=1)[0].summary == "用户在多轮对话中稳定偏好先给结论。"
+    assert repeated.status == "not_ready"
+    assert len(model.calls) == 1
+
+
+def test_agent_automatically_reflects_after_configured_learning_interval(tmp_path):
+    config = AgentConfig(
+        api_key="test-key",
+        base_url="https://example.test/compatible-mode/v1",
+        memory_db_path=tmp_path / "agent.db",
+        reflection_interval=2,
+    )
+    memory = MemoryStore(config.memory_db_path)
+    agent = ConversationalAgent(config, memory, FakeModel())
+
+    agent.reply("以后回答先给结论。", thread_id="t-auto", user_id="alice")
+    assert memory.recent_reflection_events(user_id="alice", limit=1) == []
+    agent.reply("之后也请先给结论再解释。", thread_id="t-auto", user_id="alice")
+
+    reflection = memory.recent_reflection_events(user_id="alice", limit=1)[0]
+    assert reflection.thread_id == "t-auto"
+    assert reflection.source_event_ids == [1, 2]
 
 
 def test_agent_does_not_inject_one_users_memory_into_another_user(tmp_path):

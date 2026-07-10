@@ -64,6 +64,20 @@ def ensure_sqlite_schema(db_path: str | Path) -> None:
         )
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS reflection_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT NOT NULL,
+                thread_id TEXT NOT NULL,
+                source_event_ids TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                memory_count INTEGER NOT NULL,
+                profile_fields TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS routing_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id TEXT NOT NULL,

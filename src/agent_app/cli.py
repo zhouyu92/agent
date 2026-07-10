@@ -19,11 +19,12 @@ from .memory import (
     MemoryEvolutionEvent,
     MemoryItem,
     MemoryStore,
+    ReflectionEvent,
     RetrievalEvent,
     RoutingEvent,
     ThreadMessage,
 )
-from .runtime_agent import ConversationRuntime, ThreadInspection, ThreadInspectionRuntime
+from .runtime_agent import ConversationRuntime, ReflectionRuntime, ThreadInspection, ThreadInspectionRuntime
 from .store import SqliteCliStore
 
 
@@ -162,7 +163,7 @@ def parse_dedupe_log_query(query: str) -> tuple[dict[str, object], str | None]:
 
 
 def parse_memory_evolution_log_query(query: str) -> tuple[dict[str, object], str | None]:
-    usage = "Usage: /memory-log [thread=<thread_id>] [action=<add|reinforce|revise|ignore>] [reason=<name>] [limit=<n>]"
+    usage = "Usage: /memory-log [thread=<thread_id>] [action=<add|reinforce|revise|ignore|restore>] [reason=<name>] [limit=<n>]"
     filters, text_terms, error = _parse_common_filter_tokens(
         query,
         usage=usage,
@@ -179,7 +180,7 @@ def parse_memory_evolution_log_query(query: str) -> tuple[dict[str, object], str
         lowered = token.lower()
         if lowered.startswith("action="):
             value = token.split("=", 1)[1].strip().lower()
-            if value not in {"add", "reinforce", "revise", "ignore"}:
+            if value not in {"add", "reinforce", "revise", "ignore", "restore"}:
                 return {}, usage
             filters["action"] = value
             continue
@@ -208,6 +209,14 @@ def parse_learning_query(query: str) -> tuple[dict[str, object], str | None]:
             filters["outcome"] = value
             continue
     return {key: value for key, value in filters.items() if value is not None}, None
+
+
+def parse_reflection_query(query: str) -> tuple[dict[str, object], str | None]:
+    usage = "Usage: /reflections [thread=<thread_id>] [limit=<n>]"
+    filters, text_terms, error = _parse_common_filter_tokens(query, usage=usage, allow_limit=True)
+    if error or text_terms:
+        return {}, error or usage
+    return filters, None
 
 
 def _parse_common_filter_tokens(
@@ -334,16 +343,17 @@ def main() -> None:
                 print(
                     "Commands: /profile, /memories [category=<name>] [importance=<1-5>] "
                     "[status=<active|superseded|archived>] [confirmed_before=<YYYY-MM-DD>] [stale=<true|false>] [query], /forget <memory_id>, "
-                    "/confirm-memory <memory_id>, "
+                    "/confirm-memory <memory_id>, /restore-memory <memory_id>, "
                     "/memory-hygiene [category=<name>] [days=<n>] [limit=<n>] [dry_run=<true|false>], "
                     "/confirm-stale [category=<name>] [days=<n>] [limit=<n>] [dry_run=<true|false>], "
                     "/forget-stale [category=<name>] [days=<n>] [limit=<n>] [dry_run=<true|false>], "
                     "/archive-stale [category=<name>] [days=<n>] [limit=<n>] [dry_run=<true|false>], "
                     "/dedupe-memories [thread=<thread_id>], /dedupe-log [thread=<thread_id>] [limit=<n>], "
-                    "/memory-log [thread=<thread_id>] [action=<add|reinforce|revise|ignore>] [reason=<name>] [limit=<n>], "
+                    "/memory-log [thread=<thread_id>] [action=<add|reinforce|revise|ignore|restore>] [reason=<name>] [limit=<n>], "
                     "/learning [thread=<thread_id>] [outcome=<memory+profile|memory_only|profile_only|no_change>] [limit=<n>], "
+                    "/reflections [thread=<thread_id>] [limit=<n>], "
                     "/routing [thread=<thread_id>] [learn=<true|false>] [retrieve=<true|false>] [reason=<name>] [limit=<n>] [text], "
-                    "/thread <thread_id>, /exit"
+                    "/reflect [thread_id], /thread <thread_id>, /exit"
                 )
                 continue
             if user_text == "/profile":
@@ -493,6 +503,19 @@ def main() -> None:
                 )
                 print(format_learning_events(filter_learning_events(events, outcome=filters.get("outcome"))))
                 continue
+            if user_text.startswith("/reflections"):
+                raw_query = user_text.removeprefix("/reflections").strip()
+                filters, error = parse_reflection_query(raw_query)
+                if error:
+                    print(error)
+                    continue
+                events = cli_store.recent_reflection_events(
+                    user_id=user_id,
+                    limit=int(filters.get("limit", 10)),
+                    thread_id=filters.get("thread_id"),
+                )
+                print(format_reflection_events(events))
+                continue
             if user_text.startswith("/dedupe-log"):
                 raw_query = user_text.removeprefix("/dedupe-log").strip()
                 filters, error = parse_dedupe_log_query(raw_query)
@@ -527,6 +550,23 @@ def main() -> None:
                     )
                 )
                 continue
+            if user_text == "/reflect" or user_text.startswith("/reflect "):
+                thread_id = user_text.removeprefix("/reflect").strip() or "default"
+                if not isinstance(agent, ReflectionRuntime):
+                    print("Reflection is not available for this runtime.")
+                    continue
+                result = agent.reflect(thread_id=thread_id, user_id=user_id)
+                if result.status == "not_ready":
+                    print("Reflection needs at least two unreviewed learning events in this thread.")
+                    continue
+                if result.status == "invalid_output":
+                    print("Reflection produced invalid output; no changes were saved.")
+                    continue
+                print(
+                    f"Reflection completed for {len(result.source_event_ids)} episodes: "
+                    f"{result.memory_count} memory updates, {len(result.profile_fields or [])} profile updates."
+                )
+                continue
             if user_text.startswith("/thread "):
                 thread_id = user_text.removeprefix("/thread").strip()
                 if not thread_id:
@@ -541,6 +581,7 @@ def main() -> None:
                         routing_events=cli_store.recent_routing_events(user_id=user_id, limit=20, thread_id=thread_id),
                         retrieval_events=cli_store.recent_retrieval_events(user_id=user_id, limit=20, thread_id=thread_id),
                         learning_events=cli_store.recent_learning_events(user_id=user_id, limit=20, thread_id=thread_id),
+                        reflection_events=cli_store.recent_reflection_events(user_id=user_id, limit=20, thread_id=thread_id),
                         dedupe_events=cli_store.recent_dedupe_events(user_id=user_id, limit=20, thread_id=thread_id),
                         memory_evolution_events=cli_store.recent_memory_evolution_events(
                             user_id=user_id, limit=20, thread_id=thread_id
@@ -575,6 +616,14 @@ def main() -> None:
                     continue
                 confirmed = cli_store.confirm_memory(int(raw_id), user_id=user_id)
                 print("Memory confirmed." if confirmed else "No matching active memory for current user.")
+                continue
+            if user_text.startswith("/restore-memory"):
+                raw_id = user_text.removeprefix("/restore-memory").strip()
+                if not raw_id.isdigit():
+                    print("Usage: /restore-memory <memory_id>")
+                    continue
+                restored = cli_store.restore_memory(int(raw_id), user_id=user_id)
+                print("Memory restored." if restored else "No matching archived memory for current user.")
                 continue
             if user_text.startswith("/dedupe-memories"):
                 raw_query = user_text.removeprefix("/dedupe-memories").strip()
@@ -661,6 +710,21 @@ def format_learning_events(events: list[LearningEvent]) -> str:
         lines.append(
             f"- [{event.created_at}] thread={event.thread_id} memories={event.memory_count} outcome={outcome} "
             f"profile={fields} user={preview}"
+        )
+    return "\n".join(lines)
+
+
+def format_reflection_events(events: list[ReflectionEvent]) -> str:
+    if not events:
+        return "No reflection events."
+    lines = []
+    for event in events:
+        source_ids = ",".join(str(event_id) for event_id in event.source_event_ids) or "none"
+        fields = ",".join(event.profile_fields) if event.profile_fields else "none"
+        summary = event.summary.replace("\n", " ")[:80]
+        lines.append(
+            f"- [{event.created_at}] thread={event.thread_id} episodes={source_ids} "
+            f"memories={event.memory_count} profile={fields} summary={summary}"
         )
     return "\n".join(lines)
 

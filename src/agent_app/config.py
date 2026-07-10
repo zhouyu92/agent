@@ -22,6 +22,7 @@ class AgentConfig:
     zilliz_uri: str | None = None
     zilliz_token: str | None = None
     zilliz_collection_name: str = "zy_test_agent"
+    reflection_interval: int = 0
 
     @classmethod
     def from_env(cls) -> "AgentConfig":
@@ -38,6 +39,10 @@ class AgentConfig:
                 raise ValueError("Set DASHSCOPE_BASE_URL or DASHSCOPE_WORKSPACE_ID.")
             base_url = f"https://{workspace_id}.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
 
+        reflection_interval = int(os.getenv("AGENT_REFLECTION_INTERVAL", "0"))
+        if reflection_interval != 0 and reflection_interval < 2:
+            raise ValueError("AGENT_REFLECTION_INTERVAL must be 0 or at least 2.")
+
         return cls(
             api_key=api_key,
             base_url=base_url.rstrip("/"),
@@ -52,4 +57,5 @@ class AgentConfig:
             zilliz_uri=os.getenv("ZILLIZ_URI") or None,
             zilliz_token=os.getenv("ZILLIZ_TOKEN") or None,
             zilliz_collection_name=os.getenv("ZILLIZ_COLLECTION_NAME", "zy_test_agent"),
+            reflection_interval=reflection_interval,
         )

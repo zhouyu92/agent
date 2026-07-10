@@ -45,10 +45,22 @@ def test_sqlite_audit_repository_writes_and_reads_events(tmp_path):
         memory_count=1,
         profile_fields=["style_notes"],
     )
+    repo.add_reflection_event(
+        user_id="alice",
+        thread_id="t1",
+        source_event_ids=[2, 3],
+        summary="用户稳定偏好先给结论。",
+        memory_count=1,
+        profile_fields=["style_notes"],
+    )
 
     assert repo.recent_routing_events(user_id="alice", limit=1)[0].thread_id == "t1"
     assert repo.recent_retrieval_events(user_id="alice", thread_id="t1", limit=1)[0].memory_ids == [3]
     assert repo.recent_learning_events(user_id="alice", limit=1)[0].profile_fields == ["style_notes"]
+    reflection = repo.recent_reflection_events(user_id="alice", limit=1, thread_id="t1")[0]
+    assert reflection.source_event_ids == [2, 3]
+    assert reflection.summary == "用户稳定偏好先给结论。"
+    assert reflection.memory_count == 1
 
 
 def test_sqlite_transcript_repository_writes_and_reads_messages(tmp_path):

@@ -8,6 +8,13 @@ TERM_ALIASES: dict[str, tuple[str, ...]] = {
     "偏好": ("喜欢", "喜好"),
 }
 
+MEMORY_CATEGORIES = frozenset({"fact", "preference", "relationship", "feedback", "principle", "strategy", "general"})
+
+
+def normalize_memory_category(category: str) -> str:
+    normalized = category.strip().lower()
+    return normalized if normalized in MEMORY_CATEGORIES else "general"
+
 
 def query_terms(text: str) -> set[str]:
     lowered = text.lower()
@@ -53,6 +60,7 @@ def category_alias(category: str) -> str:
         "relationship": "关系",
         "feedback": "反馈 评价",
         "principle": "原则 规则",
+        "strategy": "策略 方法 互动",
         "general": "通用",
     }
     return aliases.get(category.lower(), "")

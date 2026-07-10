@@ -41,6 +41,13 @@ class FakeGraphModel:
             "profile_updates": {"style_notes": "回答时先给结论。"},
         }
 
+    def reflect(self, episodes):
+        return {
+            "summary": "用户稳定偏好先给结论。",
+            "memories": [{"category": "preference", "content": "用户喜欢先给结论再补充原因。", "importance": 4}],
+            "profile_updates": {},
+        }
+
 
 class FakeLongTermStore:
     def __init__(self):
@@ -64,6 +71,7 @@ class FakeLongTermStore:
         self.routing_events = []
         self.retrieval_events = []
         self.learning_events = []
+        self.reflection_events = []
         self.dedupe_events = []
         self.memory_evolution_events = []
         self.saved_memories = []
@@ -111,6 +119,12 @@ class FakeLongTermStore:
 
     def add_learning_event(self, **event):
         self.learning_events.append(event)
+
+    def add_reflection_event(self, **event):
+        self.reflection_events.append(event)
+
+    def recent_reflection_events(self, user_id: str = "default", limit: int = 10, *, thread_id=None):
+        return self.reflection_events[:limit]
 
     def add_routing_event(self, **event):
         self.routing_events.append(event)
@@ -570,6 +584,53 @@ def test_langgraph_agent_accepts_long_term_store_protocol(tmp_path):
     assert store.search_calls == [("你还记得我的回答偏好吗？", 5, "alice")]
     assert store.routing_events[0]["thread_id"] == "t12"
     assert store.retrieval_events[0]["memory_ids"] == [7]
+
+
+def test_langgraph_agent_reflects_learning_events(tmp_path):
+    config = AgentConfig(
+        api_key="test-key",
+        base_url="https://example.test/compatible-mode/v1",
+        memory_db_path=tmp_path / "agent.db",
+        checkpoint_db_path=tmp_path / "checkpoints.db",
+        backend="langgraph",
+    )
+    memory = MemoryStore(config.memory_db_path)
+    memory.add_learning_event(
+        user_id="alice", thread_id="t-reflect", user_text="以后先给结论。", assistant_text="好。", memory_count=1, profile_fields=[]
+    )
+    memory.add_learning_event(
+        user_id="alice", thread_id="t-reflect", user_text="还是先给结论。", assistant_text="明白。", memory_count=1, profile_fields=[]
+    )
+    agent = LangGraphAgent(config, memory, model=FakeGraphModel())
+
+    result = agent.reflect(thread_id="t-reflect", user_id="alice")
+
+    assert result.status == "completed"
+    assert result.source_event_ids == [1, 2]
+    assert memory.recent_reflection_events(user_id="alice", limit=1)[0].memory_count == 1
+    agent.close()
+
+
+def test_langgraph_agent_automatically_reflects_after_configured_learning_interval(tmp_path):
+    config = AgentConfig(
+        api_key="test-key",
+        base_url="https://example.test/compatible-mode/v1",
+        memory_db_path=tmp_path / "agent.db",
+        checkpoint_db_path=tmp_path / "checkpoints.db",
+        backend="langgraph",
+        reflection_interval=2,
+    )
+    memory = MemoryStore(config.memory_db_path)
+    agent = LangGraphAgent(config, memory, model=FakeGraphModel())
+
+    agent.reply("以后回答先给结论。", thread_id="t-auto", user_id="alice")
+    assert memory.recent_reflection_events(user_id="alice", limit=1) == []
+    agent.reply("之后也请先给结论再解释。", thread_id="t-auto", user_id="alice")
+
+    reflection = memory.recent_reflection_events(user_id="alice", limit=1)[0]
+    assert reflection.thread_id == "t-auto"
+    assert reflection.source_event_ids == [1, 2]
+    agent.close()
 
 
 def test_langgraph_agent_accepts_split_store_dependencies(tmp_path):

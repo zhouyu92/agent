@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from .storage_utils import clean_user_id, now_iso, redact_sensitive
 
 if TYPE_CHECKING:
-    from .memory import AgentProfile, DedupeEvent, LearningEvent, MemoryEvolutionEvent, RetrievalEvent, RoutingEvent, ThreadMessage
+    from .memory import AgentProfile, DedupeEvent, LearningEvent, MemoryEvolutionEvent, ReflectionEvent, RetrievalEvent, RoutingEvent, ThreadMessage
 
 
 class SqliteProfileRepository:
@@ -125,6 +125,74 @@ class SqliteAuditRepository:
                 thread_id=row["thread_id"],
                 user_text=row["user_text"],
                 assistant_text=row["assistant_text"],
+                memory_count=row["memory_count"],
+                profile_fields=[field for field in row["profile_fields"].split(",") if field],
+                created_at=row["created_at"],
+            )
+            for row in rows
+        ]
+
+    def add_reflection_event(
+        self,
+        *,
+        user_id: str,
+        thread_id: str,
+        source_event_ids: list[int],
+        summary: str,
+        memory_count: int,
+        profile_fields: list[str],
+    ) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO reflection_events (
+                    user_id, thread_id, source_event_ids, summary,
+                    memory_count, profile_fields, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    clean_user_id(user_id),
+                    thread_id,
+                    ",".join(str(event_id) for event_id in source_event_ids),
+                    redact_sensitive(summary),
+                    memory_count,
+                    ",".join(profile_fields),
+                    now_iso(),
+                ),
+            )
+
+    def recent_reflection_events(
+        self,
+        user_id: str = "default",
+        limit: int = 10,
+        *,
+        thread_id: str | None = None,
+    ) -> list["ReflectionEvent"]:
+        from .memory import ReflectionEvent
+
+        clauses = ["user_id = ?"]
+        params: list[object] = [clean_user_id(user_id)]
+        if thread_id:
+            clauses.append("thread_id = ?")
+            params.append(thread_id)
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT * FROM reflection_events
+                WHERE {' AND '.join(clauses)}
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                [*params, limit],
+            ).fetchall()
+        return [
+            ReflectionEvent(
+                id=row["id"],
+                user_id=row["user_id"],
+                thread_id=row["thread_id"],
+                source_event_ids=[int(event_id) for event_id in row["source_event_ids"].split(",") if event_id],
+                summary=row["summary"],
                 memory_count=row["memory_count"],
                 profile_fields=[field for field in row["profile_fields"].split(",") if field],
                 created_at=row["created_at"],

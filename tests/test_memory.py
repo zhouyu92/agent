@@ -68,6 +68,18 @@ def test_search_memories_matches_query_alias_terms(tmp_path):
     assert [item.content for item in results] == ["用户偏好回答时先给结论。"]
 
 
+def test_memory_category_normalizes_unknown_values_and_supports_strategy_retrieval(tmp_path):
+    store = MemoryStore(tmp_path / "agent.db")
+    store.add_memory("unknown", "用户在复杂问题中需要先给结论。", 3, "test", user_id="alice")
+    store.add_memory("strategy", "遇到复杂问题时先给结论，再补充关键依据。", 4, "test", user_id="alice")
+
+    items = store.recent_memories(user_id="alice", limit=2)
+    strategy_results = store.search_memories("互动策略", user_id="alice", limit=5)
+
+    assert {item.category for item in items} == {"general", "strategy"}
+    assert [item.category for item in strategy_results] == ["strategy"]
+
+
 def test_search_memories_uses_vector_searcher_when_configured(tmp_path):
     store = MemoryStore(tmp_path / "agent.db")
     store.add_memory("fact", "第一条记忆", 3, "test", user_id="alice")
@@ -310,6 +322,61 @@ def test_archive_memory_only_archives_current_users_item(tmp_path):
     archived = store.archive_memory(bob_memory_id, user_id="alice")
 
     assert archived is False
+
+
+def test_restore_memory_returns_archived_item_to_active_list_and_records_audit_event(tmp_path):
+    store = MemoryStore(tmp_path / "agent.db")
+    store.add_memory("fact", "用户正在搭建 agent。", 4, "conversation", user_id="alice")
+    memory_id = store.recent_memories(user_id="alice", limit=1)[0].id
+    assert store.archive_memory(memory_id, user_id="alice") is True
+
+    restored = store.restore_memory(memory_id, user_id="alice")
+
+    active = store.recent_memories(user_id="alice", limit=10)
+    archived = store.recent_memories(user_id="alice", limit=10, status="archived")
+    event = store.recent_memory_evolution_events(user_id="alice", limit=1)[0]
+    assert restored is True
+    assert [item.id for item in active] == [memory_id]
+    assert archived == []
+    assert event.action == "restore"
+    assert event.target_memory_id == memory_id
+    assert event.result_memory_id == memory_id
+    assert event.reason == "manual_restore"
+
+
+def test_restore_memory_only_restores_current_users_archived_item(tmp_path):
+    store = MemoryStore(tmp_path / "agent.db")
+    store.add_memory("fact", "Bob 的项目。", 4, "conversation", user_id="bob")
+    memory_id = store.recent_memories(user_id="bob", limit=1)[0].id
+    assert store.archive_memory(memory_id, user_id="bob") is True
+
+    restored = store.restore_memory(memory_id, user_id="alice")
+
+    assert restored is False
+    assert [item.id for item in store.recent_memories(user_id="bob", limit=10, status="archived")] == [memory_id]
+
+
+def test_restore_memory_reindexes_item_without_rolling_back_when_vector_indexing_fails(tmp_path):
+    indexer = TrackingVectorIndexer(fail=True)
+    store = SqliteSemanticMemoryStore(tmp_path / "agent.db", vector_indexer=indexer)
+    store.repository.insert_memory(
+        user_id="alice",
+        category="fact",
+        content="用户正在搭建 agent。",
+        importance=4,
+        source="conversation",
+        created_at="2026-07-10T00:00:00+00:00",
+    )
+    memory_id = store.recent_memories(user_id="alice", limit=1)[0].id
+    assert store.archive_memory(memory_id, user_id="alice") is True
+
+    restored = store.restore_memory(memory_id, user_id="alice")
+
+    assert restored is True
+    assert [item.id for item in store.recent_memories(user_id="alice", limit=10)] == [memory_id]
+    assert len(indexer.calls) == 1
+    assert indexer.calls[0][0].id == memory_id
+    assert indexer.calls[0][0].status == "active"
 
 
 def test_evolve_memory_reinforces_synonymous_existing_memory(tmp_path):
@@ -707,6 +774,34 @@ def test_learning_events_are_recorded_per_user(tmp_path):
     assert events[0].thread_id == "thread-1"
     assert events[0].memory_count == 1
     assert events[0].profile_fields == ["style_notes"]
+
+
+def test_reflection_events_are_isolated_by_user_and_redact_sensitive_summary(tmp_path):
+    store = MemoryStore(tmp_path / "agent.db")
+    store.add_reflection_event(
+        user_id="alice",
+        thread_id="thread-1",
+        source_event_ids=[1, 2],
+        summary="用户提供了 key: sk-1234567890abcdef1234567890abcdef",
+        memory_count=1,
+        profile_fields=["style_notes"],
+    )
+    store.add_reflection_event(
+        user_id="bob",
+        thread_id="thread-2",
+        source_event_ids=[3],
+        summary="Bob 的反思。",
+        memory_count=0,
+        profile_fields=[],
+    )
+
+    events = store.recent_reflection_events(user_id="alice", limit=5, thread_id="thread-1")
+
+    assert len(events) == 1
+    assert events[0].source_event_ids == [1, 2]
+    assert events[0].profile_fields == ["style_notes"]
+    assert "sk-1234567890abcdef1234567890abcdef" not in events[0].summary
+    assert "[REDACTED_SECRET]" in events[0].summary
 
 
 def test_delete_memory_only_deletes_current_users_item(tmp_path):

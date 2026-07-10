@@ -123,6 +123,16 @@ class SqliteSemanticMemoryRepository:
                 (clean_user_id(user_id), memory_id),
             ).fetchone()
 
+    def archived_memory_by_id(self, user_id: str, memory_id: int) -> sqlite3.Row | None:
+        with self._connect() as conn:
+            return conn.execute(
+                """
+                SELECT * FROM memories
+                WHERE user_id = ? AND status = 'archived' AND id = ?
+                """,
+                (clean_user_id(user_id), memory_id),
+            ).fetchone()
+
     def recent_memories(self, user_id: str, limit: int, *, status: str = "active") -> list[sqlite3.Row]:
         with self._connect() as conn:
             return conn.execute(
@@ -153,6 +163,18 @@ class SqliteSemanticMemoryRepository:
                 UPDATE memories
                 SET status = 'archived'
                 WHERE id = ? AND user_id = ? AND status = 'active'
+                """,
+                (memory_id, clean_user_id(user_id)),
+            )
+        return cursor.rowcount > 0
+
+    def restore_memory(self, memory_id: int, user_id: str = "default") -> bool:
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE memories
+                SET status = 'active'
+                WHERE id = ? AND user_id = ? AND status = 'archived'
                 """,
                 (memory_id, clean_user_id(user_id)),
             )

@@ -12,6 +12,7 @@ from .config import AgentConfig
 from .memory import MemoryItem
 from .policies import TurnRoutingPolicy
 from .prompts import LEARNING_PROMPT, build_system_prompt
+from .reflection import ReflectionRunResult, run_reflection
 from .runtime_agent import ThreadInspection
 from .store import AuditStore, MemoryProfileStore, SemanticMemoryStore, ThreadTranscriptStore
 from .thread_state import (
@@ -135,6 +136,44 @@ class LangGraphAgent:
     def close(self) -> None:
         self._checkpointer_cm.__exit__(None, None, None)
 
+    def reflect(
+        self,
+        thread_id: str = "default",
+        user_id: str = "default",
+        min_episode_count: int = 2,
+    ) -> ReflectionRunResult:
+        def evolve_memory(category: str, content: str, importance: int):
+            result = self.semantic_memory_store.evolve_memory(
+                category=category,
+                content=content,
+                importance=importance,
+                source="reflection",
+                user_id=user_id,
+                thread_id=thread_id,
+            )
+            if self.semantic_memory_store is not self.audit_store:
+                self.audit_store.add_memory_evolution_event(
+                    user_id=user_id,
+                    thread_id=thread_id,
+                    action=result.action,
+                    candidate_category=result.candidate_category,
+                    candidate_content=result.candidate_content,
+                    target_memory_id=result.target_memory_id,
+                    result_memory_id=result.result_memory_id,
+                    reason=result.reason,
+                )
+            return result
+
+        return run_reflection(
+            audit_store=self.audit_store,
+            evolve_memory=evolve_memory,
+            update_profile=self.profile_store.update_profile,
+            model_call=self._reflection_update,
+            user_id=user_id,
+            thread_id=thread_id,
+            min_episode_count=min_episode_count,
+        )
+
     def _retrieve_node(self, state: LangGraphState, config) -> dict[str, list[RetrievedMemory]]:
         user_id = config["configurable"].get("user_id", "default")
         thread_id = config["configurable"].get("thread_id", "default")
@@ -222,6 +261,8 @@ class LangGraphAgent:
             memory_count=saved_memory_count,
             profile_fields=sorted(profile_updates),
         )
+        if self.config.reflection_interval >= 2:
+            self.reflect(thread_id=thread_id, user_id=user_id, min_episode_count=self.config.reflection_interval)
         return {}
 
     @staticmethod
@@ -267,6 +308,18 @@ class LangGraphAgent:
         )
         content = raw.content if isinstance(raw, AIMessage) else str(raw)
         return parse_learning_update(content)
+
+    def _reflection_update(self, system_prompt: str, episodes: str) -> str:
+        if hasattr(self.model, "reflect"):
+            raw = getattr(self.model, "reflect")(episodes)
+            if isinstance(raw, dict):
+                import json
+
+                return json.dumps(raw, ensure_ascii=False)
+        raw = self.model.invoke(
+            [{"role": "system", "content": system_prompt}, {"role": "user", "content": episodes}]
+        )
+        return raw.content if isinstance(raw, AIMessage) else str(raw)
 
     @staticmethod
     def _last_human_message(messages: list[BaseMessage]) -> HumanMessage:

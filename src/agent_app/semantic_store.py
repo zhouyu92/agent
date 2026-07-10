@@ -9,7 +9,7 @@ from .memory_evolution import (
     looks_like_fact_correction,
     looks_like_weak_signal,
 )
-from .semantic_memory import is_similar_memory, memory_terms, query_terms, score_memory_match
+from .semantic_memory import is_similar_memory, memory_terms, normalize_memory_category, query_terms, score_memory_match
 from .semantic_memory_repository import SqliteSemanticMemoryRepository
 from .sqlite_schema import ensure_sqlite_schema
 from .storage_utils import looks_sensitive, now_iso
@@ -107,7 +107,7 @@ class SqliteSemanticMemoryStore:
         content = content.strip()
         if not content or looks_sensitive(content):
             return False
-        normalized_category = category.strip() or "general"
+        normalized_category = normalize_memory_category(category)
         if is_similar_memory(self.repository.existing_contents(user_id, normalized_category), content):
             return False
         return self.repository.insert_memory(
@@ -132,7 +132,7 @@ class SqliteSemanticMemoryStore:
         from .memory import MemoryEvolutionResult
 
         normalized_content = content.strip()
-        normalized_category = category.strip() or "general"
+        normalized_category = normalize_memory_category(category)
         if (
             not normalized_content
             or looks_sensitive(normalized_content)
@@ -258,6 +258,23 @@ class SqliteSemanticMemoryStore:
         if archived:
             self._remove_vector_if_configured(memory_id=memory_id)
         return archived
+
+    def restore_memory(self, memory_id: int, user_id: str = "default") -> bool:
+        row = self.repository.archived_memory_by_id(user_id, memory_id)
+        if row is None:
+            return False
+        restored = self.repository.restore_memory(memory_id, user_id)
+        if restored:
+            self._index_memory_if_configured(
+                memory_id=memory_id,
+                category=row["category"],
+                content=row["content"],
+                importance=row["importance"],
+                source=row["source"],
+                created_at=row["created_at"],
+                user_id=user_id,
+            )
+        return restored
 
     def confirm_memory(self, memory_id: int, user_id: str = "default") -> bool:
         row = self.repository.active_memory_by_id(user_id, memory_id)

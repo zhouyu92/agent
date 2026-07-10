@@ -106,6 +106,22 @@ def test_memory_evolution_event_round_trip(tmp_path):
     assert events[0].reason == "correction_phrase"
 
 
+def test_sqlite_cli_store_restores_archived_memory_and_records_audit_event(tmp_path):
+    memory = MemoryStore(tmp_path / "agent.db")
+    memory.add_memory("fact", "用户正在搭建 agent。", 4, "conversation", user_id="alice")
+    memory_id = memory.recent_memories(user_id="alice", limit=1)[0].id
+    assert memory.archive_memory(memory_id, user_id="alice") is True
+    cli_store = SqliteCliStore(memory)
+
+    restored = cli_store.restore_memory(memory_id, user_id="alice")
+
+    assert restored is True
+    assert [item.id for item in cli_store.recent_memories(user_id="alice", limit=10)] == [memory_id]
+    event = cli_store.recent_memory_evolution_events(user_id="alice", limit=1)[0]
+    assert event.action == "restore"
+    assert event.reason == "manual_restore"
+
+
 def test_sqlite_audit_store_round_trips_memory_evolution_events(tmp_path):
     memory = MemoryStore(tmp_path / "agent.db")
     store = SqliteAuditStore(memory)
@@ -124,6 +140,24 @@ def test_sqlite_audit_store_round_trips_memory_evolution_events(tmp_path):
 
     assert event.action == "reinforce"
     assert event.result_memory_id == 3
+
+
+def test_sqlite_long_term_store_round_trips_reflection_events(tmp_path):
+    memory = MemoryStore(tmp_path / "agent.db")
+    store = SqliteLongTermStore(memory)
+
+    store.add_reflection_event(
+        user_id="alice",
+        thread_id="t1",
+        source_event_ids=[4, 5],
+        summary="用户更偏好先给结论，后续再解释。",
+        memory_count=1,
+        profile_fields=["style_notes"],
+    )
+
+    event = store.recent_reflection_events(user_id="alice", limit=1, thread_id="t1")[0]
+    assert event.source_event_ids == [4, 5]
+    assert event.summary == "用户更偏好先给结论，后续再解释。"
 
 
 def test_sqlite_audit_store_filters_memory_evolution_events_by_reason(tmp_path):
