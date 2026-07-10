@@ -368,6 +368,36 @@ def test_main_runs_reflection_for_requested_thread(monkeypatch, capsys):
     assert "Reflection completed for 2 episodes: 1 memory updates, 1 profile updates." in output
 
 
+def test_main_summarizes_requested_thread(monkeypatch, capsys):
+    class FakeAgent:
+        def __init__(self):
+            self.calls = []
+
+        def summarize_thread(self, thread_id: str, user_id: str):
+            self.calls.append((thread_id, user_id))
+            return "用户正在搭建长期记忆 agent。"
+
+        def close(self):
+            return None
+
+    class FakeRuntime:
+        def __init__(self, agent):
+            self.agent = agent
+            self.cli_store = object()
+
+    agent = FakeAgent()
+    config = AgentConfig(api_key="test-key", base_url="https://example.test/compatible-mode/v1", user_id="alice")
+    monkeypatch.setattr("agent_app.cli.AgentConfig.from_env", lambda: config)
+    monkeypatch.setattr("agent_app.cli.build_runtime", lambda _: FakeRuntime(agent))
+    inputs = iter(["/summarize t1", "/exit"])
+    monkeypatch.setattr("builtins.input", lambda _: next(inputs))
+
+    main()
+
+    assert agent.calls == [("t1", "alice")]
+    assert "用户正在搭建长期记忆 agent。" in capsys.readouterr().out
+
+
 def test_main_rejects_invalid_restore_memory_usage(monkeypatch, capsys):
     class FakeAgent:
         def close(self):
