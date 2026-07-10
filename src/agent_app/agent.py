@@ -8,7 +8,7 @@ from typing import Protocol
 from .config import AgentConfig
 from .memory import MemoryStore
 from .policies import TurnRoutingPolicy
-from .prompts import LEARNING_PROMPT, build_system_prompt
+from .prompts import LEARNING_PROMPT, THREAD_SUMMARY_PROMPT, build_system_prompt
 from .reflection import ReflectionRunResult, run_reflection
 from .semantic_memory import normalize_memory_category
 
@@ -143,6 +143,16 @@ class ConversationalAgent:
             thread_id=thread_id,
             min_episode_count=min_episode_count,
         )
+
+    def summarize_thread(self, thread_id: str, user_id: str = "default") -> str | None:
+        messages = self.memory.thread_messages(thread_id, limit=100)
+        if not messages:
+            return None
+        transcript = "\n".join(f"{message.role}: {message.content}" for message in messages)
+        summary = self.model.chat([{"role": "system", "content": THREAD_SUMMARY_PROMPT}, {"role": "user", "content": transcript}], temperature=0.0).strip()
+        if summary:
+            self.memory.update_thread_summary(thread_id, summary, user_id=user_id)
+        return summary or None
 
 
 def parse_learning_update(raw: str) -> LearningUpdate:

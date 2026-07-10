@@ -72,3 +72,5 @@ REFLECTION_PROMPT = """请根据多个 episode 做一次克制的跨轮反思，
 - 不要把单次表达、猜测、敏感凭据或重复信息写入长期记忆。
 - 没有稳定信号时，memories 和 profile_updates 都返回空对象或空数组。
 - 后续系统仍会用记忆演化规则判断 add、reinforce、revise 或 ignore。"""
+
+THREAD_SUMMARY_PROMPT = """请将以下对话压缩为简洁、准确的线程摘要。保留当前目标、关键决定、未完成事项和稳定上下文；不要保存敏感凭据或逐句复述。只输出摘要正文。"""

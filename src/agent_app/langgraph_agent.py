@@ -11,7 +11,7 @@ from .agent import parse_learning_update
 from .config import AgentConfig
 from .memory import MemoryItem
 from .policies import TurnRoutingPolicy
-from .prompts import LEARNING_PROMPT, build_system_prompt
+from .prompts import LEARNING_PROMPT, THREAD_SUMMARY_PROMPT, build_system_prompt
 from .reflection import ReflectionRunResult, run_reflection
 from .runtime_agent import ThreadInspection
 from .store import AuditStore, MemoryProfileStore, SemanticMemoryStore, ThreadTranscriptStore
@@ -135,6 +135,22 @@ class LangGraphAgent:
 
     def close(self) -> None:
         self._checkpointer_cm.__exit__(None, None, None)
+
+    def summarize_thread(self, thread_id: str, user_id: str = "default") -> str | None:
+        if self.transcript_store is None:
+            return None
+        messages = self.transcript_store.thread_messages(thread_id, limit=100)
+        update_summary = getattr(self.transcript_store, "update_thread_summary", None)
+        if not messages or update_summary is None:
+            return None
+        transcript = "\n".join(f"{message.role}: {message.content}" for message in messages)
+        raw = self.model.invoke(
+            [{"role": "system", "content": THREAD_SUMMARY_PROMPT}, {"role": "user", "content": transcript}]
+        )
+        summary = (raw.content if isinstance(raw, AIMessage) else str(raw)).strip()
+        if summary:
+            update_summary(thread_id, summary, user_id=user_id)
+        return summary or None
 
     def reflect(
         self,

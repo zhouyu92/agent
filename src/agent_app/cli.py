@@ -353,7 +353,7 @@ def main() -> None:
                     "/learning [thread=<thread_id>] [outcome=<memory+profile|memory_only|profile_only|no_change>] [limit=<n>], "
                     "/reflections [thread=<thread_id>] [limit=<n>], "
                     "/routing [thread=<thread_id>] [learn=<true|false>] [retrieve=<true|false>] [reason=<name>] [limit=<n>] [text], "
-                    "/reflect [thread_id], /thread <thread_id>, /exit"
+                    "/reflect [thread_id], /summarize <thread_id>, /thread <thread_id>, /exit"
                 )
                 continue
             if user_text == "/profile":
@@ -566,6 +566,17 @@ def main() -> None:
                     f"Reflection completed for {len(result.source_event_ids)} episodes: "
                     f"{result.memory_count} memory updates, {len(result.profile_fields or [])} profile updates."
                 )
+                continue
+            if user_text.startswith("/summarize"):
+                thread_id = user_text.removeprefix("/summarize").strip()
+                summarize = getattr(agent, "summarize_thread", None)
+                if not thread_id:
+                    print("Usage: /summarize <thread_id>")
+                elif summarize is None:
+                    print("Thread summary is not available for this runtime.")
+                else:
+                    summary = summarize(thread_id, user_id=user_id)
+                    print(summary or "No thread messages to summarize.")
                 continue
             if user_text.startswith("/thread "):
                 thread_id = user_text.removeprefix("/thread").strip()

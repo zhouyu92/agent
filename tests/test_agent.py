@@ -122,6 +122,18 @@ def test_agent_injects_thread_summary_into_system_prompt(tmp_path):
     assert "用户正在规划一个长期记忆 agent。" in model.calls[0]["messages"][0]["content"]
 
 
+def test_agent_summarizes_thread_and_persists_result(tmp_path):
+    config = AgentConfig(api_key="test-key", base_url="https://example.test/compatible-mode/v1", memory_db_path=tmp_path / "agent.db")
+    memory = MemoryStore(config.memory_db_path)
+    memory.add_message("t-summary", "user", "我们要做长期记忆。")
+    memory.add_message("t-summary", "assistant", "先完成反思闭环。")
+
+    summary = ConversationalAgent(config, memory, FakeModel()).summarize_thread("t-summary", user_id="alice")
+
+    assert summary is not None
+    assert memory.get_thread_summary("t-summary", user_id="alice") == summary
+
+
 def test_agent_reflects_unreviewed_learning_events_once(tmp_path):
     config = AgentConfig(
         api_key="test-key",

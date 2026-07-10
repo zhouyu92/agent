@@ -74,6 +74,9 @@ class ClassicConversationRuntime:
             min_episode_count=min_episode_count,
         )
 
+    def summarize_thread(self, thread_id: str, user_id: str = "default") -> str | None:
+        return self.agent.summarize_thread(thread_id, user_id=user_id)
+
     def get_thread_messages(self, thread_id: str, user_id: str = "default") -> list[ThreadMessage]:
         return []
 

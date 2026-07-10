@@ -348,6 +348,20 @@ def test_langgraph_agent_limits_prompt_history_without_truncating_checkpoint(tmp
     agent.close()
 
 
+def test_langgraph_agent_summarizes_thread_and_persists_result(tmp_path):
+    config = AgentConfig(api_key="test-key", base_url="https://example.test/compatible-mode/v1", memory_db_path=tmp_path / "agent.db", checkpoint_db_path=tmp_path / "checkpoints.db", backend="langgraph")
+    memory = MemoryStore(config.memory_db_path)
+    memory.add_message("t-summary", "user", "我们要做长期记忆。")
+    memory.add_message("t-summary", "assistant", "先完成反思闭环。")
+    agent = LangGraphAgent(config, memory, model=FakeGraphModel())
+
+    summary = agent.summarize_thread("t-summary", user_id="alice")
+
+    assert summary is not None
+    assert memory.get_thread_summary("t-summary", user_id="alice") == summary
+    agent.close()
+
+
 def test_langgraph_agent_stores_retrieved_memories_in_graph_state(tmp_path):
     config = AgentConfig(
         api_key="test-key",
