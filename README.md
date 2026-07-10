@@ -20,6 +20,11 @@ DASHSCOPE_MODEL=qwen3.7-max
 AGENT_USER_ID=default
 AGENT_BACKEND=classic
 AGENT_CHECKPOINT_DB=data/checkpoints.db
+EMBEDDING_MODEL=text-embedding-v4
+EMBEDDING_DIMENSION=1024
+ZILLIZ_URI=
+ZILLIZ_TOKEN=
+ZILLIZ_COLLECTION_NAME=zy_test_agent
 ```
 
 也可以直接设置完整地址：
@@ -29,6 +34,8 @@ DASHSCOPE_BASE_URL=https://your-workspace-id.cn-beijing.maas.aliyuncs.com/compat
 ```
 
 注意：如果 API key 已经在聊天、日志或公开位置暴露，建议立即轮换。
+
+Zilliz token 同样只通过环境变量读取，不要写入代码或提交到仓库。Embedding 只计划用于长期记忆检索和相似记忆匹配；`add / reinforce / revise / ignore` 的演化决策仍由本地规则层负责。
 
 如果要切到第二阶段的 LangGraph 后端，把 `AGENT_BACKEND` 改成 `langgraph`。这时线程内短期记忆会走 LangGraph checkpoint，长期记忆会先通过 `LongTermStore` 适配层接入现有 SQLite store。
 
@@ -50,6 +57,22 @@ agent-doctor
 ```bash
 agent-doctor --online
 ```
+
+初始化 Zilliz collection：
+
+```bash
+agent-zilliz-init
+```
+
+该命令会读取 `ZILLIZ_URI`、`ZILLIZ_TOKEN`、`ZILLIZ_COLLECTION_NAME` 和 `EMBEDDING_DIMENSION`。如果 collection 已存在，会直接跳过。
+
+验证 embedding + Zilliz + SQLite 的向量闭环：
+
+```bash
+agent-vector-smoke
+```
+
+该命令会写入一条临时测试记忆，索引到 Zilliz，再通过向量检索找回对应 memory id，最后清理测试数据。
 
 退出聊天：
 

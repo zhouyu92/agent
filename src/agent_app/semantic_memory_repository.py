@@ -39,10 +39,12 @@ class SqliteSemanticMemoryRepository:
         with self._connect() as conn:
             cursor = conn.execute(
                 """
-                INSERT OR IGNORE INTO memories (user_id, category, content, importance, source, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT OR IGNORE INTO memories (
+                    user_id, category, content, importance, source, created_at, last_confirmed_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (clean_user_id(user_id), category, content, importance, source, created_at),
+                (clean_user_id(user_id), category, content, importance, source, created_at, created_at),
             )
         return cursor.rowcount > 0
 
@@ -62,9 +64,9 @@ class SqliteSemanticMemoryRepository:
                 """
                 INSERT INTO memories (
                     user_id, category, content, importance, source, created_at,
-                    status, supersedes_memory_id, reinforcement_count, last_reinforced_at
+                    status, supersedes_memory_id, reinforcement_count, last_reinforced_at, last_confirmed_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, 'active', ?, 0, NULL)
+                VALUES (?, ?, ?, ?, ?, ?, 'active', ?, 0, NULL, ?)
                 """,
                 (
                     clean_user_id(user_id),
@@ -74,6 +76,7 @@ class SqliteSemanticMemoryRepository:
                     source,
                     created_at,
                     supersedes_memory_id,
+                    created_at,
                 ),
             )
         return int(cursor.lastrowid)
@@ -95,16 +98,41 @@ class SqliteSemanticMemoryRepository:
                 (clean_user_id(user_id),),
             ).fetchall()
 
-    def recent_memories(self, user_id: str, limit: int) -> list[sqlite3.Row]:
+    def active_memories_by_ids(self, user_id: str, memory_ids: list[int]) -> list[sqlite3.Row]:
+        if not memory_ids:
+            return []
+        placeholders = ",".join("?" for _ in memory_ids)
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT * FROM memories
+                WHERE user_id = ? AND status = 'active' AND id IN ({placeholders})
+                """,
+                (clean_user_id(user_id), *memory_ids),
+            ).fetchall()
+        rows_by_id = {row["id"]: row for row in rows}
+        return [rows_by_id[memory_id] for memory_id in memory_ids if memory_id in rows_by_id]
+
+    def active_memory_by_id(self, user_id: str, memory_id: int) -> sqlite3.Row | None:
         with self._connect() as conn:
             return conn.execute(
                 """
                 SELECT * FROM memories
-                WHERE user_id = ? AND status = 'active'
+                WHERE user_id = ? AND status = 'active' AND id = ?
+                """,
+                (clean_user_id(user_id), memory_id),
+            ).fetchone()
+
+    def recent_memories(self, user_id: str, limit: int, *, status: str = "active") -> list[sqlite3.Row]:
+        with self._connect() as conn:
+            return conn.execute(
+                """
+                SELECT * FROM memories
+                WHERE user_id = ? AND status = ?
                 ORDER BY id DESC
                 LIMIT ?
                 """,
-                (clean_user_id(user_id), limit),
+                (clean_user_id(user_id), status, limit),
             ).fetchall()
 
     def mark_memory_superseded(self, memory_id: int, user_id: str = "default") -> None:
@@ -117,6 +145,18 @@ class SqliteSemanticMemoryRepository:
                 """,
                 (memory_id, clean_user_id(user_id)),
             )
+
+    def archive_memory(self, memory_id: int, user_id: str = "default") -> bool:
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE memories
+                SET status = 'archived'
+                WHERE id = ? AND user_id = ? AND status = 'active'
+                """,
+                (memory_id, clean_user_id(user_id)),
+            )
+        return cursor.rowcount > 0
 
     def reinforce_memory(self, memory_id: int, *, user_id: str = "default", created_at: str, increase_importance: bool = True) -> None:
         with self._connect() as conn:
@@ -136,10 +176,11 @@ class SqliteSemanticMemoryRepository:
             conn.execute(
                 """
                 UPDATE memories
-                SET importance = ?, reinforcement_count = reinforcement_count + 1, last_reinforced_at = ?
+                SET importance = ?, reinforcement_count = reinforcement_count + 1,
+                    last_reinforced_at = ?, last_confirmed_at = ?
                 WHERE id = ? AND user_id = ?
                 """,
-                (importance, created_at, memory_id, clean_user_id(user_id)),
+                (importance, created_at, created_at, memory_id, clean_user_id(user_id)),
             )
 
     def delete_memory(self, memory_id: int, user_id: str) -> bool:

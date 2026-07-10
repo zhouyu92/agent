@@ -10,6 +10,33 @@ def test_choose_evolution_action_revise_for_correction_phrase():
     assert reason == "correction_phrase"
 
 
+def test_choose_evolution_action_revise_for_preference_shift():
+    action, reason = choose_evolution_action(
+        "我现在更喜欢先给结论。",
+        "用户喜欢先铺垫后给结论。",
+    )
+    assert action == "revise"
+    assert reason == "preference_shift"
+
+
+def test_choose_evolution_action_revise_for_fact_correction():
+    action, reason = choose_evolution_action(
+        "用户出生在上海。",
+        "用户出生在北京。",
+    )
+    assert action == "revise"
+    assert reason == "fact_correction"
+
+
+def test_choose_evolution_action_does_not_revise_contextual_preference():
+    action, reason = choose_evolution_action(
+        "写代码时我现在更喜欢先给结论。",
+        "用户喜欢先铺垫后给结论。",
+    )
+    assert action == "reinforce"
+    assert reason == "confirmed_existing_memory"
+
+
 def test_choose_evolution_action_ignore_for_identical_content():
     action, reason = choose_evolution_action("用户喜欢先给结论。", "用户喜欢先给结论。")
     assert action == "ignore"

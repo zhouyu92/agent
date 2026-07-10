@@ -2,13 +2,23 @@ from __future__ import annotations
 
 import re
 
+TERM_ALIASES: dict[str, tuple[str, ...]] = {
+    "结论": ("重点", "要点"),
+    "回答": ("回复", "答复"),
+    "偏好": ("喜欢", "喜好"),
+}
+
 
 def query_terms(text: str) -> set[str]:
     lowered = text.lower()
     words = set(re.findall(r"[a-z0-9_]{2,}", lowered))
     cjk = set(re.findall(r"[\u4e00-\u9fff]{2,}", lowered))
     chars = {char for char in lowered if "\u4e00" <= char <= "\u9fff"}
-    return words | cjk | chars
+    terms = words | cjk | chars
+    for canonical, aliases in TERM_ALIASES.items():
+        if canonical in text or any(alias in text for alias in aliases):
+            terms.add(canonical)
+    return terms
 
 
 def memory_terms(text: str) -> set[str]:
@@ -30,6 +40,9 @@ def memory_terms(text: str) -> set[str]:
         "原则",
     ]
     terms |= {keyword for keyword in keywords if keyword in text}
+    for canonical, aliases in TERM_ALIASES.items():
+        if canonical in text or any(alias in text for alias in aliases):
+            terms.add(canonical)
     return terms
 
 

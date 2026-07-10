@@ -186,12 +186,14 @@ class SqliteAuditStore:
         *,
         thread_id: str | None = None,
         action: str | None = None,
+        reason: str | None = None,
     ) -> list["MemoryEvolutionEvent"]:
         return self.repository.recent_memory_evolution_events(
             user_id=user_id,
             limit=limit,
             thread_id=thread_id,
             action=action,
+            reason=reason,
         )
 
 

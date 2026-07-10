@@ -1,4 +1,7 @@
+from datetime import date
+
 from agent_app.cli import (
+    _parse_common_filter_tokens,
     build_agent,
     filter_routing_events,
     format_audit_timeline,
@@ -8,14 +11,17 @@ from agent_app.cli import (
     format_memory_evolution_events,
     format_learning_events,
     main,
+    parse_learning_query,
     parse_memory_evolution_log_query,
     parse_dedupe_log_query,
     parse_dedupe_query,
     parse_memory_query,
     format_memories,
+    format_memory_hygiene,
     format_profile,
     format_routing_events,
     format_checkpoint_messages,
+    parse_memory_hygiene_query,
 )
 from agent_app.agent import ConversationalAgent
 from agent_app.bootstrap import build_runtime
@@ -203,10 +209,925 @@ def test_main_help_shows_memory_filter_syntax(monkeypatch, capsys):
     main()
 
     output = capsys.readouterr().out
-    assert "/memories [category=<name>] [importance=<1-5>] [status=<active|superseded>] [query]" in output
+    assert (
+        "/memories [category=<name>] [importance=<1-5>] [status=<active|superseded|archived>] "
+        "[confirmed_before=<YYYY-MM-DD>] [stale=<true|false>] [query]"
+    ) in output
     assert "/dedupe-memories [thread=<thread_id>]" in output
     assert "/dedupe-log [thread=<thread_id>] [limit=<n>]" in output
-    assert "/memory-log [thread=<thread_id>] [action=<add|reinforce|revise|ignore>] [limit=<n>]" in output
+    assert "/memory-log [thread=<thread_id>] [action=<add|reinforce|revise|ignore>] [reason=<name>] [limit=<n>]" in output
+    assert "/learning [thread=<thread_id>] [outcome=<memory+profile|memory_only|profile_only|no_change>] [limit=<n>]" in output
+    assert "/routing [thread=<thread_id>] [learn=<true|false>] [retrieve=<true|false>] [reason=<name>] [limit=<n>] [text]" in output
+    assert "/memory-hygiene [category=<name>] [days=<n>] [limit=<n>]" in output
+    assert "/confirm-memory <memory_id>" in output
+    assert "/confirm-stale [category=<name>] [days=<n>] [limit=<n>]" in output
+    assert "/forget-stale [category=<name>] [days=<n>] [limit=<n>]" in output
+    assert "/archive-stale [category=<name>] [days=<n>] [limit=<n>]" in output
+    assert "dry_run=<true|false>" in output
+
+
+def test_main_confirms_memory(monkeypatch, capsys):
+    class FakeAgent:
+        def close(self):
+            return None
+
+    class FakeCliStore:
+        def __init__(self):
+            self.calls = []
+
+        def confirm_memory(self, memory_id: int, user_id: str):
+            self.calls.append((memory_id, user_id))
+            return True
+
+    class FakeRuntime:
+        def __init__(self, cli_store):
+            self.agent = FakeAgent()
+            self.cli_store = cli_store
+
+    fake_store = FakeCliStore()
+    config = AgentConfig(
+        api_key="test-key",
+        base_url="https://example.test/compatible-mode/v1",
+        backend="classic",
+        user_id="alice",
+    )
+
+    monkeypatch.setattr("agent_app.cli.AgentConfig.from_env", lambda: config)
+    monkeypatch.setattr("agent_app.cli.build_runtime", lambda _: FakeRuntime(fake_store))
+    inputs = iter(["/confirm-memory 7", "/exit"])
+    monkeypatch.setattr("builtins.input", lambda _: next(inputs))
+
+    main()
+
+    output = capsys.readouterr().out
+    assert fake_store.calls == [(7, "alice")]
+    assert "Memory confirmed." in output
+
+
+def test_main_rejects_invalid_confirm_memory_usage(monkeypatch, capsys):
+    class FakeAgent:
+        def close(self):
+            return None
+
+    class FakeCliStore:
+        def confirm_memory(self, memory_id: int, user_id: str):
+            raise AssertionError("confirm_memory should not be called for invalid usage")
+
+    class FakeRuntime:
+        def __init__(self, cli_store):
+            self.agent = FakeAgent()
+            self.cli_store = cli_store
+
+    config = AgentConfig(
+        api_key="test-key",
+        base_url="https://example.test/compatible-mode/v1",
+        backend="classic",
+        user_id="alice",
+    )
+
+    monkeypatch.setattr("agent_app.cli.AgentConfig.from_env", lambda: config)
+    monkeypatch.setattr("agent_app.cli.build_runtime", lambda _: FakeRuntime(FakeCliStore()))
+    inputs = iter(["/confirm-memory abc", "/exit"])
+    monkeypatch.setattr("builtins.input", lambda _: next(inputs))
+
+    main()
+
+    output = capsys.readouterr().out
+    assert "Usage: /confirm-memory <memory_id>" in output
+
+
+def test_main_confirms_stale_memories(monkeypatch, capsys):
+    class FakeAgent:
+        def close(self):
+            return None
+
+    class FakeCliStore:
+        def __init__(self):
+            self.recent_calls = []
+            self.confirm_calls = []
+
+        def recent_memories(self, limit: int, user_id: str, status: str = "active"):
+            self.recent_calls.append((limit, user_id))
+            return [
+                MemoryItem(
+                    id=1,
+                    category="preference",
+                    content="用户喜欢先给结论。",
+                    importance=4,
+                    source="conversation",
+                    created_at="2026-06-01T00:00:00+00:00",
+                    status="active",
+                    last_confirmed_at="2026-06-05T00:00:00+00:00",
+                ),
+                MemoryItem(
+                    id=2,
+                    category="preference",
+                    content="用户喜欢先给结论再补原因。",
+                    importance=3,
+                    source="conversation",
+                    created_at="2026-06-02T00:00:00+00:00",
+                    status="active",
+                    last_confirmed_at="2026-06-10T00:00:00+00:00",
+                ),
+                MemoryItem(
+                    id=3,
+                    category="fact",
+                    content="用户正在搭建 agent。",
+                    importance=4,
+                    source="conversation",
+                    created_at="2026-07-08T00:00:00+00:00",
+                    status="active",
+                    last_confirmed_at="2026-07-08T00:00:00+00:00",
+                ),
+            ]
+
+        def confirm_memory(self, memory_id: int, user_id: str):
+            self.confirm_calls.append((memory_id, user_id))
+            return True
+
+    class FakeRuntime:
+        def __init__(self, cli_store):
+            self.agent = FakeAgent()
+            self.cli_store = cli_store
+
+    fake_store = FakeCliStore()
+    config = AgentConfig(
+        api_key="test-key",
+        base_url="https://example.test/compatible-mode/v1",
+        backend="classic",
+        user_id="alice",
+    )
+
+    monkeypatch.setattr("agent_app.cli.AgentConfig.from_env", lambda: config)
+    monkeypatch.setattr("agent_app.cli.build_runtime", lambda _: FakeRuntime(fake_store))
+    monkeypatch.setattr("agent_app.cli._today_date", lambda: date(2026, 7, 9))
+    inputs = iter(["/confirm-stale category=preference days=25 limit=1", "/exit"])
+    monkeypatch.setattr("builtins.input", lambda _: next(inputs))
+
+    main()
+
+    output = capsys.readouterr().out
+    assert fake_store.recent_calls == [(100, "alice")]
+    assert fake_store.confirm_calls == [(1, "alice")]
+    assert "Confirmed 1 stale memory: #1." in output
+
+
+def test_main_reports_when_no_stale_memories_match_confirm_stale(monkeypatch, capsys):
+    class FakeAgent:
+        def close(self):
+            return None
+
+    class FakeCliStore:
+        def __init__(self):
+            self.confirm_calls = []
+
+        def recent_memories(self, limit: int, user_id: str):
+            return [
+                MemoryItem(
+                    id=3,
+                    category="fact",
+                    content="用户正在搭建 agent。",
+                    importance=4,
+                    source="conversation",
+                    created_at="2026-07-08T00:00:00+00:00",
+                    status="active",
+                    last_confirmed_at="2026-07-08T00:00:00+00:00",
+                ),
+            ]
+
+        def confirm_memory(self, memory_id: int, user_id: str):
+            self.confirm_calls.append((memory_id, user_id))
+            return True
+
+    class FakeRuntime:
+        def __init__(self, cli_store):
+            self.agent = FakeAgent()
+            self.cli_store = cli_store
+
+    fake_store = FakeCliStore()
+    config = AgentConfig(
+        api_key="test-key",
+        base_url="https://example.test/compatible-mode/v1",
+        backend="classic",
+        user_id="alice",
+    )
+
+    monkeypatch.setattr("agent_app.cli.AgentConfig.from_env", lambda: config)
+    monkeypatch.setattr("agent_app.cli.build_runtime", lambda _: FakeRuntime(fake_store))
+    monkeypatch.setattr("agent_app.cli._today_date", lambda: date(2026, 7, 9))
+    inputs = iter(["/confirm-stale category=preference days=25 limit=5", "/exit"])
+    monkeypatch.setattr("builtins.input", lambda _: next(inputs))
+
+    main()
+
+    output = capsys.readouterr().out
+    assert fake_store.confirm_calls == []
+    assert "No stale memories matched." in output
+
+
+def test_main_rejects_invalid_confirm_stale_usage(monkeypatch, capsys):
+    class FakeAgent:
+        def close(self):
+            return None
+
+    class FakeCliStore:
+        def recent_memories(self, limit: int, user_id: str):
+            raise AssertionError("recent_memories should not be called for invalid usage")
+
+    class FakeRuntime:
+        def __init__(self, cli_store):
+            self.agent = FakeAgent()
+            self.cli_store = cli_store
+
+    config = AgentConfig(
+        api_key="test-key",
+        base_url="https://example.test/compatible-mode/v1",
+        backend="classic",
+        user_id="alice",
+    )
+
+    monkeypatch.setattr("agent_app.cli.AgentConfig.from_env", lambda: config)
+    monkeypatch.setattr("agent_app.cli.build_runtime", lambda _: FakeRuntime(FakeCliStore()))
+    inputs = iter(["/confirm-stale days=zero", "/exit"])
+    monkeypatch.setattr("builtins.input", lambda _: next(inputs))
+
+    main()
+
+    output = capsys.readouterr().out
+    assert "Usage: /confirm-stale [category=<name>] [days=<n>] [limit=<n>] [dry_run=<true|false>]" in output
+
+
+def test_main_previews_confirm_stale_without_mutation(monkeypatch, capsys):
+    class FakeAgent:
+        def close(self):
+            return None
+
+    class FakeCliStore:
+        def __init__(self):
+            self.confirm_calls = []
+
+        def recent_memories(self, limit: int, user_id: str):
+            return [
+                MemoryItem(
+                    id=1,
+                    category="preference",
+                    content="用户喜欢先给结论。",
+                    importance=4,
+                    source="conversation",
+                    created_at="2026-06-01T00:00:00+00:00",
+                    status="active",
+                    last_confirmed_at="2026-06-05T00:00:00+00:00",
+                ),
+            ]
+
+        def confirm_memory(self, memory_id: int, user_id: str):
+            self.confirm_calls.append((memory_id, user_id))
+            return True
+
+    class FakeRuntime:
+        def __init__(self, cli_store):
+            self.agent = FakeAgent()
+            self.cli_store = cli_store
+
+    fake_store = FakeCliStore()
+    config = AgentConfig(
+        api_key="test-key",
+        base_url="https://example.test/compatible-mode/v1",
+        backend="classic",
+        user_id="alice",
+    )
+
+    monkeypatch.setattr("agent_app.cli.AgentConfig.from_env", lambda: config)
+    monkeypatch.setattr("agent_app.cli.build_runtime", lambda _: FakeRuntime(fake_store))
+    monkeypatch.setattr("agent_app.cli._today_date", lambda: date(2026, 7, 9))
+    inputs = iter(["/confirm-stale days=25 limit=1 dry_run=true", "/exit"])
+    monkeypatch.setattr("builtins.input", lambda _: next(inputs))
+
+    main()
+
+    output = capsys.readouterr().out
+    assert fake_store.confirm_calls == []
+    assert "Dry run: would confirm 1 stale memory:" in output
+    assert "#1 [preference/4]" in output
+    assert "age=34d" in output
+    assert "confirmed=2026-06-05T00:00:00+00:00" in output
+    assert "用户喜欢先给结论。" in output
+
+
+def test_main_previews_confirm_stale_truncates_long_content(monkeypatch, capsys):
+    class FakeAgent:
+        def close(self):
+            return None
+
+    class FakeCliStore:
+        def __init__(self):
+            self.confirm_calls = []
+
+        def recent_memories(self, limit: int, user_id: str):
+            return [
+                MemoryItem(
+                    id=1,
+                    category="preference",
+                    content="用户希望每次回复都先给非常简洁的结论，然后再补充必要背景和关键判断依据，尤其是在复杂问题里也不要省略结论。",
+                    importance=4,
+                    source="conversation",
+                    created_at="2026-06-01T00:00:00+00:00",
+                    status="active",
+                    last_confirmed_at="2026-06-05T00:00:00+00:00",
+                ),
+            ]
+
+        def confirm_memory(self, memory_id: int, user_id: str):
+            self.confirm_calls.append((memory_id, user_id))
+            return True
+
+    class FakeRuntime:
+        def __init__(self, cli_store):
+            self.agent = FakeAgent()
+            self.cli_store = cli_store
+
+    fake_store = FakeCliStore()
+    config = AgentConfig(
+        api_key="test-key",
+        base_url="https://example.test/compatible-mode/v1",
+        backend="classic",
+        user_id="alice",
+    )
+
+    monkeypatch.setattr("agent_app.cli.AgentConfig.from_env", lambda: config)
+    monkeypatch.setattr("agent_app.cli.build_runtime", lambda _: FakeRuntime(fake_store))
+    monkeypatch.setattr("agent_app.cli._today_date", lambda: date(2026, 7, 9))
+    inputs = iter(["/confirm-stale days=25 limit=1 dry_run=true", "/exit"])
+    monkeypatch.setattr("builtins.input", lambda _: next(inputs))
+
+    main()
+
+    output = capsys.readouterr().out
+    assert fake_store.confirm_calls == []
+    assert "用户希望每次回复都先给非常简洁的结论，然后再补充必要背景和关键判断依据，尤其是在复杂问题..." in output
+    assert "不要省略结论。" not in output
+
+
+def test_main_forgets_stale_memories(monkeypatch, capsys):
+    class FakeAgent:
+        def close(self):
+            return None
+
+    class FakeCliStore:
+        def __init__(self):
+            self.recent_calls = []
+            self.delete_calls = []
+
+        def recent_memories(self, limit: int, user_id: str, status: str = "active"):
+            self.recent_calls.append((limit, user_id))
+            return [
+                MemoryItem(
+                    id=1,
+                    category="preference",
+                    content="用户喜欢先给结论。",
+                    importance=4,
+                    source="conversation",
+                    created_at="2026-06-01T00:00:00+00:00",
+                    status="active",
+                    last_confirmed_at="2026-06-05T00:00:00+00:00",
+                ),
+                MemoryItem(
+                    id=2,
+                    category="preference",
+                    content="用户喜欢先给结论再补原因。",
+                    importance=3,
+                    source="conversation",
+                    created_at="2026-06-02T00:00:00+00:00",
+                    status="active",
+                    last_confirmed_at="2026-06-10T00:00:00+00:00",
+                ),
+                MemoryItem(
+                    id=3,
+                    category="fact",
+                    content="用户正在搭建 agent。",
+                    importance=4,
+                    source="conversation",
+                    created_at="2026-07-08T00:00:00+00:00",
+                    status="active",
+                    last_confirmed_at="2026-07-08T00:00:00+00:00",
+                ),
+            ]
+
+        def delete_memory(self, memory_id: int, user_id: str):
+            self.delete_calls.append((memory_id, user_id))
+            return True
+
+    class FakeRuntime:
+        def __init__(self, cli_store):
+            self.agent = FakeAgent()
+            self.cli_store = cli_store
+
+    fake_store = FakeCliStore()
+    config = AgentConfig(
+        api_key="test-key",
+        base_url="https://example.test/compatible-mode/v1",
+        backend="classic",
+        user_id="alice",
+    )
+
+    monkeypatch.setattr("agent_app.cli.AgentConfig.from_env", lambda: config)
+    monkeypatch.setattr("agent_app.cli.build_runtime", lambda _: FakeRuntime(fake_store))
+    monkeypatch.setattr("agent_app.cli._today_date", lambda: date(2026, 7, 9))
+    inputs = iter(["/forget-stale category=preference days=25 limit=1", "/exit"])
+    monkeypatch.setattr("builtins.input", lambda _: next(inputs))
+
+    main()
+
+    output = capsys.readouterr().out
+    assert fake_store.recent_calls == [(100, "alice")]
+    assert fake_store.delete_calls == [(1, "alice")]
+    assert "Forgot 1 stale memory: #1." in output
+
+
+def test_main_reports_when_no_stale_memories_match_forget_stale(monkeypatch, capsys):
+    class FakeAgent:
+        def close(self):
+            return None
+
+    class FakeCliStore:
+        def __init__(self):
+            self.delete_calls = []
+
+        def recent_memories(self, limit: int, user_id: str, status: str = "active"):
+            return [
+                MemoryItem(
+                    id=3,
+                    category="fact",
+                    content="用户正在搭建 agent。",
+                    importance=4,
+                    source="conversation",
+                    created_at="2026-07-08T00:00:00+00:00",
+                    status="active",
+                    last_confirmed_at="2026-07-08T00:00:00+00:00",
+                ),
+            ]
+
+        def delete_memory(self, memory_id: int, user_id: str):
+            self.delete_calls.append((memory_id, user_id))
+            return True
+
+    class FakeRuntime:
+        def __init__(self, cli_store):
+            self.agent = FakeAgent()
+            self.cli_store = cli_store
+
+    fake_store = FakeCliStore()
+    config = AgentConfig(
+        api_key="test-key",
+        base_url="https://example.test/compatible-mode/v1",
+        backend="classic",
+        user_id="alice",
+    )
+
+    monkeypatch.setattr("agent_app.cli.AgentConfig.from_env", lambda: config)
+    monkeypatch.setattr("agent_app.cli.build_runtime", lambda _: FakeRuntime(fake_store))
+    monkeypatch.setattr("agent_app.cli._today_date", lambda: date(2026, 7, 9))
+    inputs = iter(["/forget-stale category=preference days=25 limit=5", "/exit"])
+    monkeypatch.setattr("builtins.input", lambda _: next(inputs))
+
+    main()
+
+    output = capsys.readouterr().out
+    assert fake_store.delete_calls == []
+    assert "No stale memories matched." in output
+
+
+def test_main_rejects_invalid_forget_stale_usage(monkeypatch, capsys):
+    class FakeAgent:
+        def close(self):
+            return None
+
+    class FakeCliStore:
+        def recent_memories(self, limit: int, user_id: str):
+            raise AssertionError("recent_memories should not be called for invalid usage")
+
+    class FakeRuntime:
+        def __init__(self, cli_store):
+            self.agent = FakeAgent()
+            self.cli_store = cli_store
+
+    config = AgentConfig(
+        api_key="test-key",
+        base_url="https://example.test/compatible-mode/v1",
+        backend="classic",
+        user_id="alice",
+    )
+
+    monkeypatch.setattr("agent_app.cli.AgentConfig.from_env", lambda: config)
+    monkeypatch.setattr("agent_app.cli.build_runtime", lambda _: FakeRuntime(FakeCliStore()))
+    inputs = iter(["/forget-stale days=zero", "/exit"])
+    monkeypatch.setattr("builtins.input", lambda _: next(inputs))
+
+    main()
+
+    output = capsys.readouterr().out
+    assert "Usage: /forget-stale [category=<name>] [days=<n>] [limit=<n>] [dry_run=<true|false>]" in output
+
+
+def test_main_previews_forget_stale_without_mutation(monkeypatch, capsys):
+    class FakeAgent:
+        def close(self):
+            return None
+
+    class FakeCliStore:
+        def __init__(self):
+            self.delete_calls = []
+
+        def recent_memories(self, limit: int, user_id: str):
+            return [
+                MemoryItem(
+                    id=1,
+                    category="preference",
+                    content="用户喜欢先给结论。",
+                    importance=4,
+                    source="conversation",
+                    created_at="2026-06-01T00:00:00+00:00",
+                    status="active",
+                    last_confirmed_at="2026-06-05T00:00:00+00:00",
+                ),
+            ]
+
+        def delete_memory(self, memory_id: int, user_id: str):
+            self.delete_calls.append((memory_id, user_id))
+            return True
+
+    class FakeRuntime:
+        def __init__(self, cli_store):
+            self.agent = FakeAgent()
+            self.cli_store = cli_store
+
+    fake_store = FakeCliStore()
+    config = AgentConfig(
+        api_key="test-key",
+        base_url="https://example.test/compatible-mode/v1",
+        backend="classic",
+        user_id="alice",
+    )
+
+    monkeypatch.setattr("agent_app.cli.AgentConfig.from_env", lambda: config)
+    monkeypatch.setattr("agent_app.cli.build_runtime", lambda _: FakeRuntime(fake_store))
+    monkeypatch.setattr("agent_app.cli._today_date", lambda: date(2026, 7, 9))
+    inputs = iter(["/forget-stale days=25 limit=1 dry_run=true", "/exit"])
+    monkeypatch.setattr("builtins.input", lambda _: next(inputs))
+
+    main()
+
+    output = capsys.readouterr().out
+    assert fake_store.delete_calls == []
+    assert "Dry run: would forget 1 stale memory:" in output
+    assert "#1 [preference/4]" in output
+    assert "age=34d" in output
+    assert "confirmed=2026-06-05T00:00:00+00:00" in output
+    assert "用户喜欢先给结论。" in output
+
+
+def test_main_archives_stale_memories(monkeypatch, capsys):
+    class FakeAgent:
+        def close(self):
+            return None
+
+    class FakeCliStore:
+        def __init__(self):
+            self.recent_calls = []
+            self.archive_calls = []
+
+        def recent_memories(self, limit: int, user_id: str, status: str = "active"):
+            self.recent_calls.append((limit, user_id, status))
+            return [
+                MemoryItem(
+                    id=1,
+                    category="preference",
+                    content="用户喜欢先给结论。",
+                    importance=4,
+                    source="conversation",
+                    created_at="2026-06-01T00:00:00+00:00",
+                    status="active",
+                    last_confirmed_at="2026-06-05T00:00:00+00:00",
+                ),
+                MemoryItem(
+                    id=2,
+                    category="fact",
+                    content="用户正在搭建 agent。",
+                    importance=4,
+                    source="conversation",
+                    created_at="2026-07-08T00:00:00+00:00",
+                    status="active",
+                    last_confirmed_at="2026-07-08T00:00:00+00:00",
+                ),
+            ]
+
+        def archive_memory(self, memory_id: int, user_id: str):
+            self.archive_calls.append((memory_id, user_id))
+            return True
+
+    class FakeRuntime:
+        def __init__(self, cli_store):
+            self.agent = FakeAgent()
+            self.cli_store = cli_store
+
+    fake_store = FakeCliStore()
+    config = AgentConfig(
+        api_key="test-key",
+        base_url="https://example.test/compatible-mode/v1",
+        backend="classic",
+        user_id="alice",
+    )
+
+    monkeypatch.setattr("agent_app.cli.AgentConfig.from_env", lambda: config)
+    monkeypatch.setattr("agent_app.cli.build_runtime", lambda _: FakeRuntime(fake_store))
+    monkeypatch.setattr("agent_app.cli._today_date", lambda: date(2026, 7, 9))
+    inputs = iter(["/archive-stale category=preference days=25 limit=1", "/exit"])
+    monkeypatch.setattr("builtins.input", lambda _: next(inputs))
+
+    main()
+
+    output = capsys.readouterr().out
+    assert fake_store.recent_calls == [(100, "alice", "active")]
+    assert fake_store.archive_calls == [(1, "alice")]
+    assert "Archived 1 stale memory: #1." in output
+
+
+def test_main_previews_archive_stale_without_mutation(monkeypatch, capsys):
+    class FakeAgent:
+        def close(self):
+            return None
+
+    class FakeCliStore:
+        def __init__(self):
+            self.archive_calls = []
+
+        def recent_memories(self, limit: int, user_id: str, status: str = "active"):
+            return [
+                MemoryItem(
+                    id=1,
+                    category="preference",
+                    content="用户喜欢先给结论。",
+                    importance=4,
+                    source="conversation",
+                    created_at="2026-06-01T00:00:00+00:00",
+                    status="active",
+                    last_confirmed_at="2026-06-05T00:00:00+00:00",
+                ),
+            ]
+
+        def archive_memory(self, memory_id: int, user_id: str):
+            self.archive_calls.append((memory_id, user_id))
+            return True
+
+    class FakeRuntime:
+        def __init__(self, cli_store):
+            self.agent = FakeAgent()
+            self.cli_store = cli_store
+
+    fake_store = FakeCliStore()
+    config = AgentConfig(
+        api_key="test-key",
+        base_url="https://example.test/compatible-mode/v1",
+        backend="classic",
+        user_id="alice",
+    )
+
+    monkeypatch.setattr("agent_app.cli.AgentConfig.from_env", lambda: config)
+    monkeypatch.setattr("agent_app.cli.build_runtime", lambda _: FakeRuntime(fake_store))
+    monkeypatch.setattr("agent_app.cli._today_date", lambda: date(2026, 7, 9))
+    inputs = iter(["/archive-stale days=25 limit=1 dry_run=true", "/exit"])
+    monkeypatch.setattr("builtins.input", lambda _: next(inputs))
+
+    main()
+
+    output = capsys.readouterr().out
+    assert fake_store.archive_calls == []
+    assert "Dry run: would archive 1 stale memory:" in output
+    assert "#1 [preference/4]" in output
+
+
+def test_main_rejects_invalid_archive_stale_usage(monkeypatch, capsys):
+    class FakeAgent:
+        def close(self):
+            return None
+
+    class FakeCliStore:
+        def recent_memories(self, limit: int, user_id: str, status: str = "active"):
+            raise AssertionError("recent_memories should not be called for invalid usage")
+
+    class FakeRuntime:
+        def __init__(self, cli_store):
+            self.agent = FakeAgent()
+            self.cli_store = cli_store
+
+    config = AgentConfig(
+        api_key="test-key",
+        base_url="https://example.test/compatible-mode/v1",
+        backend="classic",
+        user_id="alice",
+    )
+
+    monkeypatch.setattr("agent_app.cli.AgentConfig.from_env", lambda: config)
+    monkeypatch.setattr("agent_app.cli.build_runtime", lambda _: FakeRuntime(FakeCliStore()))
+    inputs = iter(["/archive-stale days=zero", "/exit"])
+    monkeypatch.setattr("builtins.input", lambda _: next(inputs))
+
+    main()
+
+    output = capsys.readouterr().out
+    assert "Usage: /archive-stale [category=<name>] [days=<n>] [limit=<n>] [dry_run=<true|false>]" in output
+
+
+def test_format_memory_hygiene_truncates_long_content():
+    text = format_memory_hygiene(
+        [
+            (
+                MemoryItem(
+                    id=1,
+                    category="preference",
+                    content="用户希望每次回复都先给非常简洁的结论，然后再补充必要背景和关键判断依据，尤其是在复杂问题里也不要省略结论。",
+                    importance=4,
+                    source="conversation",
+                    created_at="2026-06-01T00:00:00+00:00",
+                    status="active",
+                    last_confirmed_at="2026-06-05T00:00:00+00:00",
+                ),
+                34,
+            )
+        ],
+        days=30,
+    )
+
+    assert "用户希望每次回复都先给非常简洁的结论，然后再补充必要背景和关键判断依据，尤其是在复杂问题..." in text
+    assert "不要省略结论。" not in text
+
+
+def test_parse_memory_hygiene_query_extracts_filters():
+    filters, error = parse_memory_hygiene_query("category=preference days=45 limit=5 dry_run=true")
+
+    assert filters == {"category": "preference", "days": 45, "limit": 5, "dry_run": True}
+    assert error is None
+
+
+def test_parse_memory_hygiene_query_rejects_invalid_days():
+    filters, error = parse_memory_hygiene_query("days=zero")
+
+    assert filters == {}
+    assert error == "Usage: /memory-hygiene [category=<name>] [days=<n>] [limit=<n>] [dry_run=<true|false>]"
+
+
+def test_format_memory_hygiene_shows_empty_state():
+    assert format_memory_hygiene([], days=30) == "Memory hygiene (stale>30d):\nNo stale memories."
+
+
+def test_main_shows_memory_hygiene_view(monkeypatch, capsys):
+    class FakeAgent:
+        def close(self):
+            return None
+
+    class FakeCliStore:
+        def __init__(self):
+            self.calls = []
+
+        def recent_memories(self, limit: int, user_id: str):
+            self.calls.append((limit, user_id))
+            return [
+                MemoryItem(
+                    id=1,
+                    category="preference",
+                    content="用户喜欢先给结论。",
+                    importance=4,
+                    source="conversation",
+                    created_at="2026-06-01T00:00:00+00:00",
+                    status="active",
+                    last_confirmed_at="2026-06-05T00:00:00+00:00",
+                ),
+                MemoryItem(
+                    id=2,
+                    category="fact",
+                    content="用户正在搭建 agent。",
+                    importance=4,
+                    source="conversation",
+                    created_at="2026-07-08T00:00:00+00:00",
+                    status="active",
+                    last_confirmed_at="2026-07-08T00:00:00+00:00",
+                ),
+            ]
+
+    class FakeRuntime:
+        def __init__(self, cli_store):
+            self.agent = FakeAgent()
+            self.cli_store = cli_store
+
+    fake_store = FakeCliStore()
+    config = AgentConfig(
+        api_key="test-key",
+        base_url="https://example.test/compatible-mode/v1",
+        backend="classic",
+        user_id="alice",
+    )
+
+    monkeypatch.setattr("agent_app.cli.AgentConfig.from_env", lambda: config)
+    monkeypatch.setattr("agent_app.cli.build_runtime", lambda _: FakeRuntime(fake_store))
+    monkeypatch.setattr("agent_app.cli._today_date", lambda: date(2026, 7, 9))
+    inputs = iter(["/memory-hygiene category=preference days=30 limit=5", "/exit"])
+    monkeypatch.setattr("builtins.input", lambda _: next(inputs))
+
+    main()
+
+    output = capsys.readouterr().out
+    assert fake_store.calls == [(100, "alice")]
+    assert "Memory hygiene (stale>30d):" in output
+    assert "#1" in output
+    assert "age=34d" in output
+    assert "#2" not in output
+
+
+def test_parse_learning_query_extracts_thread_and_outcome_filters():
+    filters, error = parse_learning_query("thread=t10 outcome=no_change limit=5")
+
+    assert filters == {"thread_id": "t10", "outcome": "no_change", "limit": 5}
+    assert error is None
+
+
+def test_parse_learning_query_rejects_unknown_outcome():
+    filters, error = parse_learning_query("outcome=archived")
+
+    assert filters == {}
+    assert error == (
+        "Usage: /learning [thread=<thread_id>] "
+        "[outcome=<memory+profile|memory_only|profile_only|no_change>] [limit=<n>]"
+    )
+
+
+def test_parse_learning_query_rejects_invalid_limit():
+    filters, error = parse_learning_query("limit=zero")
+
+    assert filters == {}
+    assert error == (
+        "Usage: /learning [thread=<thread_id>] "
+        "[outcome=<memory+profile|memory_only|profile_only|no_change>] [limit=<n>]"
+    )
+
+
+def test_main_shows_learning_events_with_filters(monkeypatch, capsys):
+    class FakeAgent:
+        def close(self):
+            return None
+
+    class FakeCliStore:
+        def __init__(self):
+            self.calls = []
+
+        def recent_learning_events(self, user_id: str, limit: int, *, thread_id: str | None = None):
+            self.calls.append((user_id, limit, thread_id))
+            return [
+                LearningEvent(
+                    id=1,
+                    user_id=user_id,
+                    thread_id="t10",
+                    user_text="继续。",
+                    assistant_text="好的。",
+                    memory_count=0,
+                    profile_fields=[],
+                    created_at="2026-07-02T00:02:00+00:00",
+                ),
+                LearningEvent(
+                    id=2,
+                    user_id=user_id,
+                    thread_id="t10",
+                    user_text="以后回答先给结论。",
+                    assistant_text="我记住了。",
+                    memory_count=1,
+                    profile_fields=["style_notes"],
+                    created_at="2026-07-02T00:00:00+00:00",
+                ),
+            ]
+
+    class FakeRuntime:
+        def __init__(self, cli_store):
+            self.agent = FakeAgent()
+            self.cli_store = cli_store
+
+    fake_store = FakeCliStore()
+    config = AgentConfig(
+        api_key="test-key",
+        base_url="https://example.test/compatible-mode/v1",
+        backend="classic",
+        user_id="alice",
+    )
+
+    monkeypatch.setattr("agent_app.cli.AgentConfig.from_env", lambda: config)
+    monkeypatch.setattr("agent_app.cli.build_runtime", lambda _: FakeRuntime(fake_store))
+    inputs = iter(["/learning thread=t10 outcome=no_change limit=5", "/exit"])
+    monkeypatch.setattr("builtins.input", lambda _: next(inputs))
+
+    main()
+
+    output = capsys.readouterr().out
+    assert fake_store.calls == [("alice", 5, "t10")]
+    assert "outcome=no_change" in output
+    assert "outcome=memory+profile" not in output
 
 
 def test_main_shows_recent_memory_evolution_events(monkeypatch, capsys):
@@ -221,6 +1142,7 @@ def test_main_shows_recent_memory_evolution_events(monkeypatch, capsys):
             limit: int,
             thread_id: str | None = None,
             action: str | None = None,
+            reason: str | None = None,
         ):
             return [
                 MemoryEvolutionEvent(
@@ -278,8 +1200,9 @@ def test_main_shows_recent_memory_evolution_events_with_thread_filter(monkeypatc
             limit: int,
             thread_id: str | None = None,
             action: str | None = None,
+            reason: str | None = None,
         ):
-            self.calls.append((user_id, limit, thread_id))
+            self.calls.append((user_id, limit, thread_id, action, reason))
             return [
                 MemoryEvolutionEvent(
                     id=1,
@@ -316,7 +1239,7 @@ def test_main_shows_recent_memory_evolution_events_with_thread_filter(monkeypatc
     main()
 
     output = capsys.readouterr().out
-    assert fake_store.calls == [("alice", 10, "t10")]
+    assert fake_store.calls == [("alice", 10, "t10", None, None)]
     assert "action=reinforce" in output
 
 
@@ -335,8 +1258,9 @@ def test_main_shows_recent_memory_evolution_events_with_action_filter(monkeypatc
             limit: int,
             thread_id: str | None = None,
             action: str | None = None,
+            reason: str | None = None,
         ):
-            self.calls.append((user_id, limit, thread_id, action))
+            self.calls.append((user_id, limit, thread_id, action, reason))
             return [
                 MemoryEvolutionEvent(
                     id=1,
@@ -373,7 +1297,7 @@ def test_main_shows_recent_memory_evolution_events_with_action_filter(monkeypatc
     main()
 
     output = capsys.readouterr().out
-    assert fake_store.calls == [("alice", 10, None, "revise")]
+    assert fake_store.calls == [("alice", 10, None, "revise", None)]
     assert "action=revise" in output
 
 
@@ -383,7 +1307,14 @@ def test_main_rejects_invalid_memory_log_filter(monkeypatch, capsys):
             return None
 
     class FakeCliStore:
-        def recent_memory_evolution_events(self, user_id: str, limit: int, thread_id: str | None = None):
+        def recent_memory_evolution_events(
+            self,
+            user_id: str,
+            limit: int,
+            thread_id: str | None = None,
+            action: str | None = None,
+            reason: str | None = None,
+        ):
             raise AssertionError("recent_memory_evolution_events should not be called for invalid filters")
 
     class FakeRuntime:
@@ -406,7 +1337,7 @@ def test_main_rejects_invalid_memory_log_filter(monkeypatch, capsys):
     main()
 
     output = capsys.readouterr().out
-    assert "Usage: /memory-log [thread=<thread_id>] [action=<add|reinforce|revise|ignore>] [limit=<n>]" in output
+    assert "Usage: /memory-log [thread=<thread_id>] [action=<add|reinforce|revise|ignore>] [reason=<name>] [limit=<n>]" in output
 
 
 def test_main_shows_recent_dedupe_events(monkeypatch, capsys):
@@ -626,13 +1557,37 @@ def test_format_memory_evolution_events_shows_empty_state():
     assert format_memory_evolution_events([]) == "No memory evolution events."
 
 
+def test_format_memory_evolution_events_shows_category_and_candidate_preview():
+    events = [
+        MemoryEvolutionEvent(
+            id=1,
+            user_id="alice",
+            thread_id="t10",
+            action="ignore",
+            candidate_category="preference",
+            candidate_content="用户偏好回答时先给结论，再补充原因。",
+            target_memory_id=3,
+            result_memory_id=None,
+            reason="no_new_information",
+            created_at="2026-07-04T12:00:00+00:00",
+        )
+    ]
+
+    text = format_memory_evolution_events(events)
+
+    assert "action=ignore" in text
+    assert "category=preference" in text
+    assert "candidate=用户偏好回答时先给结论，再补充原因。" in text
+    assert "reason=no_new_information" in text
+
+
 def test_main_filters_memories_by_category_and_importance(monkeypatch, capsys):
     class FakeAgent:
         def close(self):
             return None
 
     class FakeCliStore:
-        def recent_memories(self, limit: int, user_id: str):
+        def recent_memories(self, limit: int, user_id: str, status: str = "active"):
             return [
                 MemoryItem(
                     id=1,
@@ -692,7 +1647,7 @@ def test_main_filters_memories_by_status(monkeypatch, capsys):
             return None
 
     class FakeCliStore:
-        def recent_memories(self, limit: int, user_id: str):
+        def recent_memories(self, limit: int, user_id: str, status: str = "active"):
             return [
                 MemoryItem(
                     id=1,
@@ -740,6 +1695,115 @@ def test_main_filters_memories_by_status(monkeypatch, capsys):
     assert "用户以前喜欢先铺垫。" in output
 
 
+def test_main_filters_memories_by_confirmed_before(monkeypatch, capsys):
+    class FakeAgent:
+        def close(self):
+            return None
+
+    class FakeCliStore:
+        def recent_memories(self, limit: int, user_id: str):
+            return [
+                MemoryItem(
+                    id=1,
+                    category="preference",
+                    content="用户喜欢先给结论。",
+                    importance=4,
+                    source="conversation",
+                    created_at="2026-07-02T00:00:00+00:00",
+                    status="active",
+                    last_confirmed_at="2026-07-03T00:00:00+00:00",
+                ),
+                MemoryItem(
+                    id=2,
+                    category="fact",
+                    content="用户正在搭建 agent。",
+                    importance=4,
+                    source="conversation",
+                    created_at="2026-07-02T00:01:00+00:00",
+                    status="active",
+                    last_confirmed_at="2026-07-08T00:00:00+00:00",
+                ),
+            ]
+
+    class FakeRuntime:
+        def __init__(self, cli_store):
+            self.agent = FakeAgent()
+            self.cli_store = cli_store
+
+    config = AgentConfig(
+        api_key="test-key",
+        base_url="https://example.test/compatible-mode/v1",
+        backend="classic",
+        user_id="alice",
+    )
+
+    monkeypatch.setattr("agent_app.cli.AgentConfig.from_env", lambda: config)
+    monkeypatch.setattr("agent_app.cli.build_runtime", lambda _: FakeRuntime(FakeCliStore()))
+    inputs = iter(["/memories confirmed_before=2026-07-05", "/exit"])
+    monkeypatch.setattr("builtins.input", lambda _: next(inputs))
+
+    main()
+
+    output = capsys.readouterr().out
+    assert "#1" in output
+    assert "#2" not in output
+
+
+def test_main_filters_memories_by_stale(monkeypatch, capsys):
+    class FakeAgent:
+        def close(self):
+            return None
+
+    class FakeCliStore:
+        def recent_memories(self, limit: int, user_id: str):
+            return [
+                MemoryItem(
+                    id=1,
+                    category="preference",
+                    content="用户喜欢先给结论。",
+                    importance=4,
+                    source="conversation",
+                    created_at="2026-06-01T00:00:00+00:00",
+                    status="active",
+                    last_confirmed_at="2026-06-05T00:00:00+00:00",
+                ),
+                MemoryItem(
+                    id=2,
+                    category="fact",
+                    content="用户正在搭建 agent。",
+                    importance=4,
+                    source="conversation",
+                    created_at="2026-07-01T00:00:00+00:00",
+                    status="active",
+                    last_confirmed_at="2026-07-08T00:00:00+00:00",
+                ),
+            ]
+
+    class FakeRuntime:
+        def __init__(self, cli_store):
+            self.agent = FakeAgent()
+            self.cli_store = cli_store
+
+    config = AgentConfig(
+        api_key="test-key",
+        base_url="https://example.test/compatible-mode/v1",
+        backend="classic",
+        user_id="alice",
+    )
+
+    monkeypatch.setattr("agent_app.cli.AgentConfig.from_env", lambda: config)
+    monkeypatch.setattr("agent_app.cli.build_runtime", lambda _: FakeRuntime(FakeCliStore()))
+    monkeypatch.setattr("agent_app.cli._today_date", lambda: date(2026, 7, 9))
+    inputs = iter(["/memories stale=true", "/exit"])
+    monkeypatch.setattr("builtins.input", lambda _: next(inputs))
+
+    main()
+
+    output = capsys.readouterr().out
+    assert "#1" in output
+    assert "#2" not in output
+
+
 def test_main_rejects_invalid_memory_importance_filter(monkeypatch, capsys):
     class FakeAgent:
         def close(self):
@@ -772,7 +1836,10 @@ def test_main_rejects_invalid_memory_importance_filter(monkeypatch, capsys):
     main()
 
     output = capsys.readouterr().out
-    assert "Usage: /memories [category=<name>] [importance=<1-5>] [status=<active|superseded>] [query]" in output
+    assert (
+        "Usage: /memories [category=<name>] [importance=<1-5>] [status=<active|superseded|archived>] "
+        "[confirmed_before=<YYYY-MM-DD>] [stale=<true|false>] [query]"
+    ) in output
 
 
 def test_main_rejects_empty_memory_category_filter(monkeypatch, capsys):
@@ -807,7 +1874,10 @@ def test_main_rejects_empty_memory_category_filter(monkeypatch, capsys):
     main()
 
     output = capsys.readouterr().out
-    assert "Usage: /memories [category=<name>] [importance=<1-5>] [status=<active|superseded>] [query]" in output
+    assert (
+        "Usage: /memories [category=<name>] [importance=<1-5>] [status=<active|superseded|archived>] "
+        "[confirmed_before=<YYYY-MM-DD>] [stale=<true|false>] [query]"
+    ) in output
 
 
 def test_main_rejects_unknown_memory_filter(monkeypatch, capsys):
@@ -842,33 +1912,78 @@ def test_main_rejects_unknown_memory_filter(monkeypatch, capsys):
     main()
 
     output = capsys.readouterr().out
-    assert "Usage: /memories [category=<name>] [importance=<1-5>] [status=<active|superseded>] [query]" in output
+    assert (
+        "Usage: /memories [category=<name>] [importance=<1-5>] [status=<active|superseded|archived>] "
+        "[confirmed_before=<YYYY-MM-DD>] [stale=<true|false>] [query]"
+    ) in output
 
 
 def test_parse_memory_query_extracts_filters_and_text_query():
-    query, filters, error = parse_memory_query("category=preference importance=4 status=active 结论优先")
+    query, filters, error = parse_memory_query(
+        "category=preference importance=4 status=active confirmed_before=2026-07-05 stale=true 结论优先"
+    )
 
     assert query == "结论优先"
     assert filters == {
         "category": "preference",
         "importance": 4,
         "status": "active",
+        "confirmed_before": "2026-07-05",
+        "stale": True,
     }
     assert error is None
 
 
 def test_parse_memory_query_rejects_unknown_status():
-    query, filters, error = parse_memory_query("status=archived")
+    query, filters, error = parse_memory_query("status=paused")
 
     assert query == ""
     assert filters == {}
-    assert error == "Usage: /memories [category=<name>] [importance=<1-5>] [status=<active|superseded>] [query]"
+    assert error == (
+        "Usage: /memories [category=<name>] [importance=<1-5>] [status=<active|superseded|archived>] "
+        "[confirmed_before=<YYYY-MM-DD>] [stale=<true|false>] [query]"
+    )
+
+
+def test_parse_memory_query_accepts_archived_status():
+    query, filters, error = parse_memory_query("status=archived")
+
+    assert query == ""
+    assert filters == {"status": "archived"}
+    assert error is None
+
+
+def test_parse_memory_query_rejects_invalid_confirmed_before():
+    query, filters, error = parse_memory_query("confirmed_before=soon")
+
+    assert query == ""
+    assert filters == {}
+    assert error == (
+        "Usage: /memories [category=<name>] [importance=<1-5>] [status=<active|superseded|archived>] "
+        "[confirmed_before=<YYYY-MM-DD>] [stale=<true|false>] [query]"
+    )
+
+
+def test_parse_memory_query_rejects_invalid_stale_value():
+    query, filters, error = parse_memory_query("stale=maybe")
+
+    assert query == ""
+    assert filters == {}
+    assert error == (
+        "Usage: /memories [category=<name>] [importance=<1-5>] [status=<active|superseded|archived>] "
+        "[confirmed_before=<YYYY-MM-DD>] [stale=<true|false>] [query]"
+    )
 
 
 def test_parse_memory_evolution_log_query_extracts_filters():
-    filters, error = parse_memory_evolution_log_query("thread=t10 action=revise limit=5")
+    filters, error = parse_memory_evolution_log_query("thread=t10 action=revise reason=correction_phrase limit=5")
 
-    assert filters == {"thread_id": "t10", "action": "revise", "limit": 5}
+    assert filters == {
+        "thread_id": "t10",
+        "action": "revise",
+        "reason": "correction_phrase",
+        "limit": 5,
+    }
     assert error is None
 
 
@@ -876,7 +1991,65 @@ def test_parse_memory_evolution_log_query_rejects_unknown_action():
     filters, error = parse_memory_evolution_log_query("action=archive")
 
     assert filters == {}
-    assert error == "Usage: /memory-log [thread=<thread_id>] [action=<add|reinforce|revise|ignore>] [limit=<n>]"
+    assert error == "Usage: /memory-log [thread=<thread_id>] [action=<add|reinforce|revise|ignore>] [reason=<name>] [limit=<n>]"
+
+
+def test_main_shows_recent_memory_evolution_events_with_reason_filter(monkeypatch, capsys):
+    class FakeAgent:
+        def close(self):
+            return None
+
+    class FakeCliStore:
+        def __init__(self):
+            self.calls = []
+
+        def recent_memory_evolution_events(
+            self,
+            user_id: str,
+            limit: int,
+            thread_id: str | None = None,
+            action: str | None = None,
+            reason: str | None = None,
+        ):
+            self.calls.append((user_id, limit, thread_id, action, reason))
+            return [
+                MemoryEvolutionEvent(
+                    id=1,
+                    user_id=user_id,
+                    thread_id=thread_id,
+                    action="ignore",
+                    candidate_category="preference",
+                    candidate_content="用户偏好回答时先给结论，再补充原因。",
+                    target_memory_id=3,
+                    result_memory_id=None,
+                    reason=reason or "no_new_information",
+                    created_at="2026-07-04T12:00:00+00:00",
+                )
+            ]
+
+    class FakeRuntime:
+        def __init__(self, cli_store):
+            self.agent = FakeAgent()
+            self.cli_store = cli_store
+
+    fake_store = FakeCliStore()
+    config = AgentConfig(
+        api_key="test-key",
+        base_url="https://example.test/compatible-mode/v1",
+        backend="classic",
+        user_id="alice",
+    )
+
+    monkeypatch.setattr("agent_app.cli.AgentConfig.from_env", lambda: config)
+    monkeypatch.setattr("agent_app.cli.build_runtime", lambda _: FakeRuntime(fake_store))
+    inputs = iter(["/memory-log reason=no_new_information", "/exit"])
+    monkeypatch.setattr("builtins.input", lambda _: next(inputs))
+
+    main()
+
+    output = capsys.readouterr().out
+    assert fake_store.calls == [("alice", 10, None, None, "no_new_information")]
+    assert "reason=no_new_information" in output
 
 
 def test_parse_memory_query_rejects_unknown_filter():
@@ -884,7 +2057,10 @@ def test_parse_memory_query_rejects_unknown_filter():
 
     assert query == ""
     assert filters == {}
-    assert error == "Usage: /memories [category=<name>] [importance=<1-5>] [status=<active|superseded>] [query]"
+    assert error == (
+        "Usage: /memories [category=<name>] [importance=<1-5>] [status=<active|superseded|archived>] "
+        "[confirmed_before=<YYYY-MM-DD>] [stale=<true|false>] [query]"
+    )
 
 
 def test_parse_dedupe_query_extracts_thread_filter():
@@ -937,6 +2113,7 @@ def test_format_memories_lists_memory_items():
             source="conversation",
             created_at="2026-07-02T00:00:00+00:00",
             status="active",
+            last_confirmed_at="2026-07-03T00:00:00+00:00",
         )
     ]
 
@@ -945,6 +2122,7 @@ def test_format_memories_lists_memory_items():
     assert "#1" in text
     assert "[preference/4]" in text
     assert "[active]" in text
+    assert "confirmed=2026-07-03T00:00:00+00:00" in text
     assert "用户喜欢先给结论。" in text
 
 
@@ -966,7 +2144,30 @@ def test_format_learning_events_lists_recent_events():
 
     assert "t1" in text
     assert "memories=1" in text
+    assert "outcome=memory+profile" in text
     assert "style_notes" in text
+
+
+def test_format_learning_events_marks_no_change_outcome():
+    events = [
+        LearningEvent(
+            id=1,
+            user_id="alice",
+            thread_id="t2",
+            user_text="继续。",
+            assistant_text="好的。",
+            memory_count=0,
+            profile_fields=[],
+            created_at="2026-07-02T00:02:00+00:00",
+        )
+    ]
+
+    text = format_learning_events(events)
+
+    assert "t2" in text
+    assert "memories=0" in text
+    assert "outcome=no_change" in text
+    assert "profile=none" in text
 
 
 def test_format_routing_events_shows_empty_state():
@@ -1058,15 +2259,161 @@ def test_filter_routing_events_by_reason_or_preview_text():
 def test_parse_routing_query_extracts_store_filters():
     from agent_app.cli import parse_routing_query
 
-    filters = parse_routing_query("thread=t10 learn=false recall_turn")
+    filters, error = parse_routing_query("thread=t10 learn=false limit=5 recall_turn")
 
     assert filters == {
         "thread_id": "t10",
         "learn": False,
         "retrieve": None,
         "reason": "recall_turn",
+        "limit": 5,
         "text_query": None,
     }
+    assert error is None
+
+
+def test_parse_common_filter_tokens_extracts_thread_reason_limit_and_text():
+    filters, text_terms, error = _parse_common_filter_tokens(
+        "thread=t10 reason=recall_turn limit=5 hello world",
+        usage="Usage: test",
+        allow_reason=True,
+        allow_limit=True,
+    )
+
+    assert filters == {"thread_id": "t10", "reason": "recall_turn", "limit": 5}
+    assert text_terms == ["hello", "world"]
+    assert error is None
+
+
+def test_parse_common_filter_tokens_rejects_invalid_limit():
+    filters, text_terms, error = _parse_common_filter_tokens(
+        "limit=zero",
+        usage="Usage: test",
+        allow_limit=True,
+    )
+
+    assert filters == {}
+    assert text_terms == []
+    assert error == "Usage: test"
+
+
+def test_parse_routing_query_rejects_invalid_limit():
+    from agent_app.cli import parse_routing_query
+
+    filters, error = parse_routing_query("limit=zero")
+
+    assert filters == {}
+    assert error == (
+        "Usage: /routing [thread=<thread_id>] [learn=<true|false>] "
+        "[retrieve=<true|false>] [reason=<name>] [limit=<n>] [text]"
+    )
+
+
+def test_parse_routing_query_rejects_invalid_boolean():
+    from agent_app.cli import parse_routing_query
+
+    filters, error = parse_routing_query("learn=maybe")
+
+    assert filters == {}
+    assert error == (
+        "Usage: /routing [thread=<thread_id>] [learn=<true|false>] "
+        "[retrieve=<true|false>] [reason=<name>] [limit=<n>] [text]"
+    )
+
+
+def test_main_rejects_invalid_routing_filter(monkeypatch, capsys):
+    class FakeAgent:
+        def close(self):
+            return None
+
+    class FakeCliStore:
+        def recent_routing_events(self, *args, **kwargs):
+            raise AssertionError("recent_routing_events should not be called for invalid filters")
+
+    class FakeRuntime:
+        def __init__(self, cli_store):
+            self.agent = FakeAgent()
+            self.cli_store = cli_store
+
+    config = AgentConfig(
+        api_key="test-key",
+        base_url="https://example.test/compatible-mode/v1",
+        backend="classic",
+        user_id="alice",
+    )
+
+    monkeypatch.setattr("agent_app.cli.AgentConfig.from_env", lambda: config)
+    monkeypatch.setattr("agent_app.cli.build_runtime", lambda _: FakeRuntime(FakeCliStore()))
+    inputs = iter(["/routing learn=maybe", "/exit"])
+    monkeypatch.setattr("builtins.input", lambda _: next(inputs))
+
+    main()
+
+    output = capsys.readouterr().out
+    assert (
+        "Usage: /routing [thread=<thread_id>] [learn=<true|false>] "
+        "[retrieve=<true|false>] [reason=<name>] [limit=<n>] [text]"
+    ) in output
+
+
+def test_main_shows_routing_events_with_limit_filter(monkeypatch, capsys):
+    class FakeAgent:
+        def close(self):
+            return None
+
+    class FakeCliStore:
+        def __init__(self):
+            self.calls = []
+
+        def recent_routing_events(
+            self,
+            user_id: str,
+            limit: int = 10,
+            *,
+            thread_id: str | None = None,
+            learn: bool | None = None,
+            retrieve: bool | None = None,
+            reason: str | None = None,
+            text_query: str | None = None,
+        ):
+            self.calls.append((user_id, limit, thread_id, learn, retrieve, reason, text_query))
+            return [
+                RoutingEvent(
+                    id=1,
+                    user_id=user_id,
+                    thread_id="t10",
+                    user_text="谢谢",
+                    should_retrieve=False,
+                    retrieve_reason="low_signal",
+                    should_learn=False,
+                    learn_reason="low_signal",
+                    created_at="2026-07-02T00:00:00+00:00",
+                )
+            ]
+
+    class FakeRuntime:
+        def __init__(self, cli_store):
+            self.agent = FakeAgent()
+            self.cli_store = cli_store
+
+    fake_store = FakeCliStore()
+    config = AgentConfig(
+        api_key="test-key",
+        base_url="https://example.test/compatible-mode/v1",
+        backend="classic",
+        user_id="alice",
+    )
+
+    monkeypatch.setattr("agent_app.cli.AgentConfig.from_env", lambda: config)
+    monkeypatch.setattr("agent_app.cli.build_runtime", lambda _: FakeRuntime(fake_store))
+    inputs = iter(["/routing limit=5 recall_turn", "/exit"])
+    monkeypatch.setattr("builtins.input", lambda _: next(inputs))
+
+    main()
+
+    output = capsys.readouterr().out
+    assert fake_store.calls == [("alice", 5, None, None, None, "recall_turn", None)]
+    assert "retrieve=False" in output
 
 
 def test_format_audit_timeline_combines_routing_and_learning_sections():
@@ -1150,6 +2497,37 @@ def test_format_audit_timeline_combines_routing_and_learning_sections():
     assert "先给结论" in text
     assert "ids=7" in text
     assert "kept=3" in text
+    assert "outcome=memory+profile" in text
+
+
+def test_format_audit_timeline_shows_memory_evolution_candidate_preview():
+    text = format_audit_timeline(
+        "t10",
+        messages=[],
+        routing_events=[],
+        retrieval_events=[],
+        learning_events=[],
+        dedupe_events=[],
+        memory_evolution_events=[
+            MemoryEvolutionEvent(
+                id=1,
+                user_id="alice",
+                thread_id="t10",
+                action="ignore",
+                candidate_category="preference",
+                candidate_content="用户偏好回答时先给结论，再补充原因。",
+                target_memory_id=3,
+                result_memory_id=None,
+                reason="no_new_information",
+                created_at="2026-07-04T12:00:00+00:00",
+            )
+        ],
+    )
+
+    assert "memory_evolution ignore" in text
+    assert "category=preference" in text
+    assert "candidate=用户偏好回答时先给结论，再补充原因。" in text
+    assert "reason=no_new_information" in text
 
 
 def test_format_checkpoint_messages_shows_checkpoint_state_separately():
@@ -1481,7 +2859,8 @@ def test_format_thread_inspection_renders_from_unified_inspection():
 
     assert "Thread audit: t10" in text
     assert "dedupe removed=1 ids=7 kept=3" in text
-    assert "memory_evolution revise target=3 result=4 reason=correction_phrase" in text
+    assert "memory_evolution revise category=preference target=3 result=4 reason=correction_phrase" in text
+    assert "candidate=以后回答先给结论。" in text
     assert "Checkpoint state: t10" in text
     assert "Retrieval compare: t10" in text
     assert "Checkpoint diff: t10" in text
@@ -1602,6 +2981,86 @@ def test_build_runtime_returns_explicit_langgraph_dependencies(tmp_path):
     assert runtime.agent.thread_state_store is runtime.thread_state_store
     assert runtime.thread_state_store.checkpoint_state_reader is runtime.checkpoint_state_reader
     assert runtime.thread_state_store.transcript_store is runtime.long_term_store.transcript_store
+
+
+def test_build_runtime_does_not_configure_vector_indexer_without_zilliz_config(tmp_path):
+    config = AgentConfig(
+        api_key="test-key",
+        base_url="https://example.test/compatible-mode/v1",
+        memory_db_path=tmp_path / "agent.db",
+        checkpoint_db_path=tmp_path / "checkpoints.db",
+        backend="langgraph",
+    )
+
+    runtime = build_runtime(config)
+
+    assert runtime.long_term_store.semantic_memory_store.vector_indexer is None
+
+
+def test_build_runtime_configures_classic_vector_indexer_and_searcher_with_zilliz_config(tmp_path, monkeypatch):
+    created_indexers = []
+    created_searchers = []
+
+    class TrackingVectorMemoryIndexer:
+        def __init__(self, config):
+            created_indexers.append(config)
+
+    class TrackingVectorMemorySearcher:
+        def __init__(self, config):
+            created_searchers.append(config)
+
+    monkeypatch.setattr("agent_app.bootstrap.VectorMemoryIndexer", TrackingVectorMemoryIndexer)
+    monkeypatch.setattr("agent_app.bootstrap.VectorMemorySearcher", TrackingVectorMemorySearcher)
+
+    config = AgentConfig(
+        api_key="test-key",
+        base_url="https://example.test/compatible-mode/v1",
+        memory_db_path=tmp_path / "agent.db",
+        checkpoint_db_path=tmp_path / "checkpoints.db",
+        backend="classic",
+        zilliz_uri="https://example.zilliz.com.cn",
+        zilliz_token="test-token",
+    )
+
+    runtime = build_runtime(config)
+
+    assert created_indexers == [config]
+    assert created_searchers == [config]
+    assert isinstance(runtime.memory_store.semantic_store.vector_indexer, TrackingVectorMemoryIndexer)
+    assert isinstance(runtime.memory_store.semantic_store.vector_searcher, TrackingVectorMemorySearcher)
+
+
+def test_build_runtime_configures_vector_indexer_and_searcher_with_zilliz_config(tmp_path, monkeypatch):
+    created_indexers = []
+    created_searchers = []
+
+    class TrackingVectorMemoryIndexer:
+        def __init__(self, config):
+            created_indexers.append(config)
+
+    class TrackingVectorMemorySearcher:
+        def __init__(self, config):
+            created_searchers.append(config)
+
+    monkeypatch.setattr("agent_app.bootstrap.VectorMemoryIndexer", TrackingVectorMemoryIndexer)
+    monkeypatch.setattr("agent_app.bootstrap.VectorMemorySearcher", TrackingVectorMemorySearcher)
+
+    config = AgentConfig(
+        api_key="test-key",
+        base_url="https://example.test/compatible-mode/v1",
+        memory_db_path=tmp_path / "agent.db",
+        checkpoint_db_path=tmp_path / "checkpoints.db",
+        backend="langgraph",
+        zilliz_uri="https://example.zilliz.com.cn",
+        zilliz_token="test-token",
+    )
+
+    runtime = build_runtime(config)
+
+    assert created_indexers == [config]
+    assert created_searchers == [config]
+    assert isinstance(runtime.long_term_store.semantic_memory_store.vector_indexer, TrackingVectorMemoryIndexer)
+    assert isinstance(runtime.long_term_store.semantic_memory_store.vector_searcher, TrackingVectorMemorySearcher)
 
 
 def test_build_runtime_uses_langgraph_thread_inspection_builder(tmp_path, monkeypatch):

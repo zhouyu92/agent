@@ -7,6 +7,7 @@ from typing import Protocol
 
 from .config import AgentConfig
 from .memory import MemoryStore
+from .policies import TurnRoutingPolicy
 from .prompts import LEARNING_PROMPT, build_system_prompt
 
 
@@ -29,13 +30,41 @@ class LearningUpdate:
 
 
 class ConversationalAgent:
-    def __init__(self, config: AgentConfig, memory: MemoryStore, model: ChatModel) -> None:
+    def __init__(
+        self,
+        config: AgentConfig,
+        memory: MemoryStore,
+        model: ChatModel,
+        routing_policy: TurnRoutingPolicy | None = None,
+    ) -> None:
         self.config = config
         self.memory = memory
         self.model = model
+        self.routing_policy = routing_policy or TurnRoutingPolicy()
 
     def reply(self, user_text: str, thread_id: str = "default", user_id: str = "default") -> str:
-        relevant_memories = self.memory.search_memories(user_text, limit=5, user_id=user_id)
+        decision = self.routing_policy.evaluate(user_text)
+        self.memory.add_routing_event(
+            user_id=user_id,
+            thread_id=thread_id,
+            user_text=user_text,
+            should_retrieve=decision.should_retrieve,
+            retrieve_reason=decision.retrieve_reason,
+            should_learn=decision.should_learn,
+            learn_reason=decision.learn_reason,
+        )
+
+        relevant_memories = []
+        if decision.should_retrieve:
+            relevant_memories = self.memory.search_memories(user_text, limit=5, user_id=user_id)
+            self.memory.add_retrieval_event(
+                user_id=user_id,
+                thread_id=thread_id,
+                user_text=user_text,
+                memory_count=len(relevant_memories),
+                memory_ids=[item.id for item in relevant_memories],
+                memory_preview=" | ".join(item.content for item in relevant_memories[:3]),
+            )
         profile = self.memory.get_profile()
         recent = self.memory.recent_messages(thread_id, self.config.max_recent_turns * 2)
         messages = [{"role": "system", "content": build_system_prompt(profile, relevant_memories)}]
@@ -45,7 +74,8 @@ class ConversationalAgent:
         assistant_text = self.model.chat(messages)
         self.memory.add_message(thread_id, "user", user_text)
         self.memory.add_message(thread_id, "assistant", assistant_text)
-        self._learn_from_turn(user_text, assistant_text, thread_id=thread_id, user_id=user_id)
+        if decision.should_learn:
+            self._learn_from_turn(user_text, assistant_text, thread_id=thread_id, user_id=user_id)
         return assistant_text
 
     def _learn_from_turn(self, user_text: str, assistant_text: str, thread_id: str, user_id: str) -> None:

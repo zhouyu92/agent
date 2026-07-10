@@ -9,6 +9,7 @@ dependencies = [
     "langgraph>=0.4.0",
     "langgraph-checkpoint-sqlite>=2.0.0",
     "openai>=1.0.0",
+    "pymilvus>=2.4.0",
     "python-dotenv>=1.0.0",
 ]
 
@@ -20,6 +21,8 @@ dev = [
 [project.scripts]
 agent-chat = "agent_app.cli:main"
 agent-doctor = "agent_app.doctor:main"
+agent-zilliz-init = "agent_app.zilliz:main"
+agent-vector-smoke = "agent_app.vector_smoke:main"
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

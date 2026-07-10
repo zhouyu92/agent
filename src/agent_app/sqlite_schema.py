@@ -139,6 +139,14 @@ def ensure_sqlite_schema(db_path: str | Path) -> None:
         _ensure_column(conn, "memories", "supersedes_memory_id", "INTEGER")
         _ensure_column(conn, "memories", "reinforcement_count", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "memories", "last_reinforced_at", "TEXT")
+        _ensure_column(conn, "memories", "last_confirmed_at", "TEXT")
+        conn.execute(
+            """
+            UPDATE memories
+            SET last_confirmed_at = COALESCE(last_confirmed_at, last_reinforced_at, created_at)
+            WHERE last_confirmed_at IS NULL
+            """
+        )
         _ensure_column(conn, "retrieval_events", "memory_ids", "TEXT NOT NULL DEFAULT ''")
         _ensure_column(conn, "dedupe_events", "thread_id", "TEXT")
         _ensure_column(conn, "dedupe_events", "kept_ids", "TEXT NOT NULL DEFAULT ''")

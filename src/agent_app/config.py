@@ -17,6 +17,11 @@ class AgentConfig:
     max_recent_turns: int = 8
     user_id: str = "default"
     backend: str = "classic"
+    embedding_model: str = "text-embedding-v4"
+    embedding_dimension: int = 1024
+    zilliz_uri: str | None = None
+    zilliz_token: str | None = None
+    zilliz_collection_name: str = "zy_test_agent"
 
     @classmethod
     def from_env(cls) -> "AgentConfig":
@@ -42,4 +47,9 @@ class AgentConfig:
             max_recent_turns=int(os.getenv("AGENT_MAX_RECENT_TURNS", "8")),
             user_id=os.getenv("AGENT_USER_ID", "default"),
             backend=os.getenv("AGENT_BACKEND", "classic"),
+            embedding_model=os.getenv("EMBEDDING_MODEL", "text-embedding-v4"),
+            embedding_dimension=int(os.getenv("EMBEDDING_DIMENSION", "1024")),
+            zilliz_uri=os.getenv("ZILLIZ_URI") or None,
+            zilliz_token=os.getenv("ZILLIZ_TOKEN") or None,
+            zilliz_collection_name=os.getenv("ZILLIZ_COLLECTION_NAME", "zy_test_agent"),
         )

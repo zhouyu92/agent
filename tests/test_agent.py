@@ -202,3 +202,58 @@ def test_agent_records_memory_evolution_event_after_reply(tmp_path):
     assert event.action == "add"
     assert event.candidate_category == "preference"
     assert event.result_memory_id is not None
+
+
+def test_classic_agent_persists_routing_audit_for_skipped_turn(tmp_path):
+    config = AgentConfig(
+        api_key="test-key",
+        base_url="https://example.test/compatible-mode/v1",
+        memory_db_path=tmp_path / "agent.db",
+    )
+    memory = MemoryStore(config.memory_db_path)
+    agent = ConversationalAgent(config, memory, model=FakeModel())
+
+    agent.reply("谢谢", thread_id="t10", user_id="alice")
+
+    event = memory.recent_routing_events(user_id="alice", limit=1)[0]
+    assert event.thread_id == "t10"
+    assert event.user_text == "谢谢"
+    assert event.should_retrieve is False
+    assert event.retrieve_reason == "low_signal"
+    assert event.should_learn is False
+    assert event.learn_reason == "low_signal"
+    assert memory.recent_retrieval_events(user_id="alice", thread_id="t10", limit=1) == []
+    assert memory.recent_learning_events(user_id="alice", limit=1) == []
+
+
+def test_classic_agent_persists_retrieval_audit_for_recalled_turn(tmp_path):
+    config = AgentConfig(
+        api_key="test-key",
+        base_url="https://example.test/compatible-mode/v1",
+        memory_db_path=tmp_path / "agent.db",
+    )
+    memory = MemoryStore(config.memory_db_path)
+    memory.add_memory(
+        category="preference",
+        content="用户喜欢先给结论再补充原因。",
+        importance=4,
+        source="conversation",
+        user_id="alice",
+    )
+    agent = ConversationalAgent(config, memory, model=FakeModel())
+
+    agent.reply("你还记得我的回答偏好吗？", thread_id="t11", user_id="alice")
+
+    routing_event = memory.recent_routing_events(user_id="alice", limit=1)[0]
+    retrieval_event = memory.recent_retrieval_events(user_id="alice", thread_id="t11", limit=1)[0]
+    assert routing_event.thread_id == "t11"
+    assert routing_event.should_retrieve is True
+    assert routing_event.retrieve_reason == "default_retrieve"
+    assert routing_event.should_learn is False
+    assert routing_event.learn_reason == "recall_turn"
+    assert retrieval_event.thread_id == "t11"
+    assert retrieval_event.memory_count == 1
+    assert len(retrieval_event.memory_ids) == 1
+    assert retrieval_event.memory_ids[0] > 0
+    assert "先给结论" in retrieval_event.memory_preview
+    assert memory.recent_learning_events(user_id="alice", limit=1) == []

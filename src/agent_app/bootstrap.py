@@ -16,6 +16,7 @@ from .thread_state import (
     LangGraphThreadStateStore,
     ThreadStateStore,
 )
+from .vector_memory import VectorMemoryIndexer, VectorMemorySearcher
 
 
 @dataclass(frozen=True)
@@ -29,10 +30,20 @@ class AgentRuntime:
 
 
 def build_runtime(config: AgentConfig) -> AgentRuntime:
-    memory_store = MemoryStore(config.memory_db_path)
+    vector_indexer = VectorMemoryIndexer(config) if config.zilliz_uri and config.zilliz_token else None
+    vector_searcher = VectorMemorySearcher(config) if config.zilliz_uri and config.zilliz_token else None
+    memory_store = MemoryStore(
+        config.memory_db_path,
+        vector_indexer=vector_indexer,
+        vector_searcher=vector_searcher,
+    )
     if config.backend == "langgraph":
         model = LangChainQwenClient(config)
-        long_term_store = SqliteLongTermStore(memory_store)
+        long_term_store = SqliteLongTermStore(
+            memory_store,
+            vector_indexer=vector_indexer,
+            vector_searcher=vector_searcher,
+        )
         cli_store = SqliteCliStore(memory_store, long_term_store)
         checkpoint_state_reader = LangGraphCheckpointStateReader()
         thread_state_store = LangGraphThreadStateStore(

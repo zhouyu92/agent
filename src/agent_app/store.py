@@ -17,7 +17,7 @@ from .memory import (
     ThreadMessage,
 )
 from .record_stores import SqliteAuditStore, SqliteProfileStore, SqliteTranscriptStore
-from .semantic_store import SqliteSemanticMemoryStore
+from .semantic_store import SqliteSemanticMemoryStore, VectorMemoryIndexer, VectorMemorySearcher
 
 
 @runtime_checkable
@@ -146,6 +146,7 @@ class AuditStore(Protocol):
         *,
         thread_id: str | None = None,
         action: str | None = None,
+        reason: str | None = None,
     ) -> list[MemoryEvolutionEvent]:
         ...
 
@@ -161,9 +162,18 @@ class ThreadTranscriptStore(Protocol):
 
 
 class SqliteLongTermStore:
-    def __init__(self, memory: MemoryStore) -> None:
+    def __init__(
+        self,
+        memory: MemoryStore,
+        vector_indexer: VectorMemoryIndexer | None = None,
+        vector_searcher: VectorMemorySearcher | None = None,
+    ) -> None:
         self.memory = memory
-        self.semantic_memory_store = SqliteSemanticMemoryStore(memory.db_path)
+        self.semantic_memory_store = SqliteSemanticMemoryStore(
+            memory.db_path,
+            vector_indexer=vector_indexer,
+            vector_searcher=vector_searcher,
+        )
         self.profile_store = SqliteProfileStore(memory)
         self.audit_store = SqliteAuditStore(memory)
         self.transcript_store = SqliteTranscriptStore(memory)
@@ -355,12 +365,14 @@ class SqliteLongTermStore:
         *,
         thread_id: str | None = None,
         action: str | None = None,
+        reason: str | None = None,
     ) -> list[MemoryEvolutionEvent]:
         return self.audit_store.recent_memory_evolution_events(
             user_id=user_id,
             limit=limit,
             thread_id=thread_id,
             action=action,
+            reason=reason,
         )
 
 
@@ -377,14 +389,40 @@ class SqliteCliStore:
     def get_profile(self) -> AgentProfile:
         return self.long_term_store.profile_store.get_profile()
 
-    def search_memories(self, query: str, limit: int = 10, user_id: str = "default") -> list[MemoryItem]:
-        return self.long_term_store.semantic_memory_store.search_memories(query, limit=limit, user_id=user_id)
+    def search_memories(self, query: str, limit: int = 10, user_id: str = "default", status: str = "active") -> list[MemoryItem]:
+        if status == "active":
+            return self.long_term_store.semantic_memory_store.search_memories(query, limit=limit, user_id=user_id)
+        return self.long_term_store.semantic_memory_store.search_memories(query, limit=limit, user_id=user_id, status=status)
 
-    def recent_memories(self, limit: int = 10, user_id: str = "default") -> list[MemoryItem]:
-        return self.long_term_store.semantic_memory_store.recent_memories(limit=limit, user_id=user_id)
+    def recent_memories(self, limit: int = 10, user_id: str = "default", status: str = "active") -> list[MemoryItem]:
+        if status == "active":
+            return self.long_term_store.semantic_memory_store.recent_memories(limit=limit, user_id=user_id)
+        return self.long_term_store.semantic_memory_store.recent_memories(limit=limit, user_id=user_id, status=status)
 
     def delete_memory(self, memory_id: int, user_id: str = "default") -> bool:
         return self.long_term_store.semantic_memory_store.delete_memory(memory_id, user_id=user_id)
+
+    def archive_memory(self, memory_id: int, user_id: str = "default") -> bool:
+        return self.long_term_store.semantic_memory_store.archive_memory(memory_id, user_id=user_id)
+
+    def confirm_memory(self, memory_id: int, user_id: str = "default") -> bool:
+        row = self.long_term_store.semantic_memory_store.repository.active_memory_by_id(user_id, memory_id)
+        if row is None:
+            return False
+        confirmed = self.long_term_store.semantic_memory_store.confirm_memory(memory_id, user_id=user_id)
+        if not confirmed:
+            return False
+        self.long_term_store.audit_store.add_memory_evolution_event(
+            user_id=user_id,
+            thread_id=None,
+            action="reinforce",
+            candidate_category=row["category"],
+            candidate_content=row["content"],
+            target_memory_id=memory_id,
+            result_memory_id=memory_id,
+            reason="manual_confirmation",
+        )
+        return True
 
     def dedupe_memories(self, user_id: str = "default", thread_id: str | None = None) -> DedupeResult:
         result = self.long_term_store.dedupe_memories(user_id=user_id, thread_id=thread_id)
@@ -457,12 +495,14 @@ class SqliteCliStore:
         *,
         thread_id: str | None = None,
         action: str | None = None,
+        reason: str | None = None,
     ) -> list[MemoryEvolutionEvent]:
         return self.long_term_store.audit_store.recent_memory_evolution_events(
             user_id=user_id,
             limit=limit,
             thread_id=thread_id,
             action=action,
+            reason=reason,
         )
 
     def thread_messages(self, thread_id: str, limit: int = 50) -> list[ThreadMessage]:

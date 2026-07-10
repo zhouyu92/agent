@@ -23,6 +23,25 @@ def test_config_builds_beijing_base_url_from_workspace_id(monkeypatch):
     assert str(config.checkpoint_db_path).endswith("data\\lg-checkpoints.db")
 
 
+def test_config_reads_embedding_and_zilliz_settings(monkeypatch):
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "test-key")
+    monkeypatch.setenv("DASHSCOPE_WORKSPACE_ID", "ws-123")
+    monkeypatch.setenv("EMBEDDING_MODEL", "text-embedding-v4")
+    monkeypatch.setenv("EMBEDDING_DIMENSION", "1024")
+    monkeypatch.setenv("ZILLIZ_URI", "https://example.zilliz.com.cn")
+    monkeypatch.setenv("ZILLIZ_TOKEN", "test-token")
+    monkeypatch.delenv("ZILLIZ_COLLECTION_NAME", raising=False)
+    monkeypatch.delenv("DASHSCOPE_BASE_URL", raising=False)
+
+    config = AgentConfig.from_env()
+
+    assert config.embedding_model == "text-embedding-v4"
+    assert config.embedding_dimension == 1024
+    assert config.zilliz_uri == "https://example.zilliz.com.cn"
+    assert config.zilliz_token == "test-token"
+    assert config.zilliz_collection_name == "zy_test_agent"
+
+
 def test_config_requires_api_key(monkeypatch):
     monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
     monkeypatch.setenv("DASHSCOPE_WORKSPACE_ID", "ws-123")

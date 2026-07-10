@@ -1,4 +1,36 @@
 from agent_app.memory import DedupeResult, MemoryStore
+from agent_app.semantic_store import SqliteSemanticMemoryStore
+
+
+class TrackingVectorIndexer:
+    def __init__(self, fail=False):
+        self.fail = fail
+        self.calls = []
+        self.remove_calls = []
+
+    def index_memory(self, memory, *, user_id):
+        self.calls.append((memory, user_id))
+        if self.fail:
+            raise RuntimeError("index failed")
+        return True
+
+    def remove_memory(self, *, memory_id):
+        self.remove_calls.append(memory_id)
+        if self.fail:
+            raise RuntimeError("remove failed")
+
+
+class TrackingVectorSearcher:
+    def __init__(self, memory_ids=None, fail=False):
+        self.memory_ids = memory_ids or []
+        self.fail = fail
+        self.calls = []
+
+    def search_memory_ids(self, query, *, user_id, limit):
+        self.calls.append((query, user_id, limit))
+        if self.fail:
+            raise RuntimeError("vector search failed")
+        return self.memory_ids
 
 
 def test_memory_store_retrieves_relevant_items(tmp_path):
@@ -19,6 +51,69 @@ def test_memory_store_retrieves_relevant_items(tmp_path):
     results = store.search_memories("这个 agent 应该怎么学习？", limit=2)
 
     assert [item.content for item in results] == ["用户正在搭建一个能自我学习的 agent。"]
+
+
+def test_search_memories_matches_query_alias_terms(tmp_path):
+    store = MemoryStore(tmp_path / "agent.db")
+    store.add_memory(
+        category="preference",
+        content="用户偏好回答时先给结论。",
+        importance=4,
+        source="test",
+        user_id="alice",
+    )
+
+    results = store.search_memories("重点", limit=5, user_id="alice")
+
+    assert [item.content for item in results] == ["用户偏好回答时先给结论。"]
+
+
+def test_search_memories_uses_vector_searcher_when_configured(tmp_path):
+    store = MemoryStore(tmp_path / "agent.db")
+    store.add_memory("fact", "第一条记忆", 3, "test", user_id="alice")
+    store.add_memory("fact", "第二条记忆", 4, "test", user_id="alice")
+    first_id = store.recent_memories(user_id="alice", limit=2)[1].id
+    second_id = store.recent_memories(user_id="alice", limit=2)[0].id
+    vector_searcher = TrackingVectorSearcher(memory_ids=[second_id, first_id])
+    vector_store = SqliteSemanticMemoryStore(tmp_path / "agent.db", vector_searcher=vector_searcher)
+
+    results = vector_store.search_memories("语义检索", limit=2, user_id="alice")
+
+    assert [item.id for item in results] == [second_id, first_id]
+    assert vector_searcher.calls == [("语义检索", "alice", 2)]
+
+
+def test_search_memories_falls_back_to_keyword_search_when_vector_search_fails(tmp_path):
+    store = MemoryStore(tmp_path / "agent.db")
+    store.add_memory(
+        "preference",
+        "用户偏好回答时先给结论。",
+        4,
+        "test",
+        user_id="alice",
+    )
+    vector_searcher = TrackingVectorSearcher(fail=True)
+    vector_store = SqliteSemanticMemoryStore(tmp_path / "agent.db", vector_searcher=vector_searcher)
+
+    results = vector_store.search_memories("重点", limit=5, user_id="alice")
+
+    assert [item.content for item in results] == ["用户偏好回答时先给结论。"]
+    assert vector_searcher.calls == [("重点", "alice", 5)]
+
+
+def test_memory_store_accepts_vector_searcher(tmp_path):
+    setup_store = MemoryStore(tmp_path / "agent.db")
+    setup_store.add_memory("fact", "第一条记忆", 3, "test", user_id="alice")
+    setup_store.add_memory("fact", "第二条记忆", 4, "test", user_id="alice")
+    first_id = setup_store.recent_memories(user_id="alice", limit=2)[1].id
+    second_id = setup_store.recent_memories(user_id="alice", limit=2)[0].id
+    vector_searcher = TrackingVectorSearcher(memory_ids=[second_id, first_id])
+    store = MemoryStore(tmp_path / "agent.db", vector_searcher=vector_searcher)
+
+    results = store.search_memories("语义检索", limit=2, user_id="alice")
+
+    assert [item.id for item in results] == [second_id, first_id]
+    assert vector_searcher.calls == [("语义检索", "alice", 2)]
 
 
 def test_agent_profile_can_be_created_and_updated(tmp_path):
@@ -56,6 +151,16 @@ def test_recent_memories_returns_latest_items_first(tmp_path):
     assert [item.content for item in results] == ["第二条记忆"]
 
 
+def test_recent_memory_includes_last_confirmed_at_for_added_memory(tmp_path):
+    store = MemoryStore(tmp_path / "agent.db")
+
+    store.add_memory("fact", "用户正在搭建一个会持续学习的 agent。", 4, "test", user_id="alice")
+
+    result = store.recent_memories(limit=1, user_id="alice")[0]
+
+    assert result.last_confirmed_at == result.created_at
+
+
 def test_recent_memories_exclude_superseded_by_default(tmp_path):
     store = MemoryStore(tmp_path / "agent.db")
     repository = store.semantic_store.repository
@@ -90,6 +195,28 @@ def test_evolve_memory_adds_new_memory_when_no_active_match(tmp_path):
     assert result.result_memory_id is not None
 
 
+def test_evolve_memory_indexes_added_memory_when_vector_indexer_is_configured(tmp_path):
+    indexer = TrackingVectorIndexer()
+    store = SqliteSemanticMemoryStore(tmp_path / "agent.db", vector_indexer=indexer)
+
+    result = store.evolve_memory(
+        category="fact",
+        content="用户正在搭建一个持续学习 agent。",
+        importance=4,
+        source="conversation",
+        user_id="alice",
+    )
+
+    assert result.action == "add"
+    assert len(indexer.calls) == 1
+    indexed_memory, indexed_user_id = indexer.calls[0]
+    assert indexed_memory.id == result.result_memory_id
+    assert indexed_memory.category == "fact"
+    assert indexed_memory.content == "用户正在搭建一个持续学习 agent。"
+    assert indexed_memory.status == "active"
+    assert indexed_user_id == "alice"
+
+
 def test_evolve_memory_reinforces_existing_memory(tmp_path):
     store = MemoryStore(tmp_path / "agent.db")
     repository = store.semantic_store.repository
@@ -116,6 +243,153 @@ def test_evolve_memory_reinforces_existing_memory(tmp_path):
     assert result.target_memory_id == memory_id
     assert result.result_memory_id == memory_id
     assert refreshed.id == memory_id
+    assert refreshed.last_confirmed_at is not None
+    assert refreshed.last_confirmed_at == refreshed.created_at or refreshed.last_confirmed_at > refreshed.created_at
+
+
+def test_confirm_memory_refreshes_last_confirmed_at_without_importance_bump(tmp_path):
+    store = MemoryStore(tmp_path / "agent.db")
+    repository = store.semantic_store.repository
+    repository.insert_memory(
+        user_id="alice",
+        category="preference",
+        content="用户喜欢先给结论。",
+        importance=3,
+        source="conversation",
+        created_at="2026-07-06T00:00:00+00:00",
+    )
+    memory_id = store.recent_memories(user_id="alice", limit=1)[0].id
+
+    confirmed = store.confirm_memory(memory_id, user_id="alice")
+    refreshed = store.recent_memories(user_id="alice", limit=1)[0]
+    events = store.recent_memory_evolution_events(user_id="alice", limit=1)
+
+    assert confirmed is True
+    assert refreshed.id == memory_id
+    assert refreshed.importance == 3
+    assert refreshed.last_confirmed_at is not None
+    assert refreshed.last_confirmed_at > refreshed.created_at
+    assert events[0].action == "reinforce"
+    assert events[0].target_memory_id == memory_id
+    assert events[0].result_memory_id == memory_id
+    assert events[0].reason == "manual_confirmation"
+
+
+def test_confirm_memory_only_confirms_current_users_item(tmp_path):
+    store = MemoryStore(tmp_path / "agent.db")
+    store.add_memory("fact", "用户正在搭建 agent。", 4, "conversation", user_id="alice")
+    store.add_memory("fact", "Bob 的项目。", 4, "conversation", user_id="bob")
+    bob_memory_id = store.recent_memories(user_id="bob", limit=1)[0].id
+
+    confirmed = store.confirm_memory(bob_memory_id, user_id="alice")
+
+    assert confirmed is False
+
+
+def test_archive_memory_moves_item_out_of_active_list_and_into_archived_list(tmp_path):
+    store = MemoryStore(tmp_path / "agent.db")
+    store.add_memory("fact", "用户正在搭建 agent。", 4, "conversation", user_id="alice")
+    memory_id = store.recent_memories(user_id="alice", limit=1)[0].id
+
+    archived = store.archive_memory(memory_id, user_id="alice")
+    active = store.recent_memories(user_id="alice", limit=10)
+    archived_items = store.recent_memories(user_id="alice", limit=10, status="archived")
+
+    assert archived is True
+    assert active == []
+    assert [item.id for item in archived_items] == [memory_id]
+    assert archived_items[0].status == "archived"
+
+
+def test_archive_memory_only_archives_current_users_item(tmp_path):
+    store = MemoryStore(tmp_path / "agent.db")
+    store.add_memory("fact", "用户正在搭建 agent。", 4, "conversation", user_id="alice")
+    store.add_memory("fact", "Bob 的项目。", 4, "conversation", user_id="bob")
+    bob_memory_id = store.recent_memories(user_id="bob", limit=1)[0].id
+
+    archived = store.archive_memory(bob_memory_id, user_id="alice")
+
+    assert archived is False
+
+
+def test_evolve_memory_reinforces_synonymous_existing_memory(tmp_path):
+    store = MemoryStore(tmp_path / "agent.db")
+    repository = store.semantic_store.repository
+    repository.insert_memory(
+        user_id="alice",
+        category="preference",
+        content="用户喜欢回复时先说重点。",
+        importance=3,
+        source="conversation",
+        created_at="2026-07-06T00:00:00+00:00",
+    )
+    memory_id = store.recent_memories(user_id="alice", limit=1)[0].id
+
+    result = store.semantic_store.evolve_memory(
+        category="preference",
+        content="用户偏好答复时先给结论。",
+        importance=4,
+        source="conversation",
+        user_id="alice",
+    )
+    memories = store.recent_memories(user_id="alice", limit=10)
+
+    assert result.action == "reinforce"
+    assert result.target_memory_id == memory_id
+    assert result.result_memory_id == memory_id
+    assert len(memories) == 1
+
+
+def test_evolve_memory_uses_vector_candidate_for_active_match(tmp_path):
+    store = MemoryStore(tmp_path / "agent.db")
+    store.add_memory(
+        "preference",
+        "用户偏好回答时先给结论。",
+        4,
+        "conversation",
+        user_id="alice",
+    )
+    memory_id = store.recent_memories(user_id="alice", limit=1)[0].id
+    vector_searcher = TrackingVectorSearcher(memory_ids=[memory_id])
+    vector_store = SqliteSemanticMemoryStore(tmp_path / "agent.db", vector_searcher=vector_searcher)
+
+    result = vector_store.evolve_memory(
+        category="preference",
+        content="用户还是喜欢回答时先给结论。",
+        importance=4,
+        source="conversation",
+        user_id="alice",
+    )
+
+    assert result.action == "reinforce"
+    assert result.target_memory_id == memory_id
+    assert vector_searcher.calls == [("用户还是喜欢回答时先给结论。", "alice", 5)]
+
+
+def test_evolve_memory_ignores_vector_candidate_from_different_category(tmp_path):
+    store = MemoryStore(tmp_path / "agent.db")
+    store.add_memory(
+        "fact",
+        "用户正在搭建一个持续学习 agent。",
+        4,
+        "conversation",
+        user_id="alice",
+    )
+    fact_id = store.recent_memories(user_id="alice", limit=1)[0].id
+    vector_searcher = TrackingVectorSearcher(memory_ids=[fact_id])
+    vector_store = SqliteSemanticMemoryStore(tmp_path / "agent.db", vector_searcher=vector_searcher)
+
+    result = vector_store.evolve_memory(
+        category="preference",
+        content="用户喜欢回答时先给结论。",
+        importance=4,
+        source="conversation",
+        user_id="alice",
+    )
+
+    assert result.action == "add"
+    assert result.target_memory_id is None
+    assert result.result_memory_id != fact_id
 
 
 def test_evolve_memory_revises_existing_memory(tmp_path):
@@ -144,6 +418,168 @@ def test_evolve_memory_revises_existing_memory(tmp_path):
     assert result.target_memory_id == old_id
     assert result.result_memory_id is not None
     assert any(row["id"] == old_id and row["status"] == "superseded" for row in all_memories)
+    revised = next(row for row in all_memories if row["id"] == result.result_memory_id)
+    assert revised["last_confirmed_at"] == revised["created_at"]
+
+
+def test_evolve_memory_indexes_revised_memory_when_vector_indexer_is_configured(tmp_path):
+    indexer = TrackingVectorIndexer()
+    store = SqliteSemanticMemoryStore(tmp_path / "agent.db", vector_indexer=indexer)
+    store.repository.insert_memory(
+        user_id="alice",
+        category="preference",
+        content="用户喜欢详细铺垫后再给结论。",
+        importance=3,
+        source="conversation",
+        created_at="2026-07-06T00:00:00+00:00",
+    )
+
+    result = store.evolve_memory(
+        category="preference",
+        content="以后回答不是先铺垫，而是先给结论。",
+        importance=4,
+        source="conversation",
+        user_id="alice",
+    )
+
+    assert result.action == "revise"
+    assert len(indexer.calls) == 1
+    indexed_memory, indexed_user_id = indexer.calls[0]
+    assert indexed_memory.id == result.result_memory_id
+    assert indexed_memory.status == "active"
+    assert indexed_memory.content == "以后回答不是先铺垫，而是先给结论。"
+    assert indexed_user_id == "alice"
+    assert indexer.remove_calls == [result.target_memory_id]
+
+
+def test_evolve_memory_keeps_revision_when_vector_remove_fails(tmp_path):
+    indexer = TrackingVectorIndexer(fail=True)
+    store = SqliteSemanticMemoryStore(tmp_path / "agent.db", vector_indexer=indexer)
+    store.repository.insert_memory(
+        user_id="alice",
+        category="preference",
+        content="用户喜欢详细铺垫后再给结论。",
+        importance=3,
+        source="conversation",
+        created_at="2026-07-06T00:00:00+00:00",
+    )
+
+    result = store.evolve_memory(
+        category="preference",
+        content="以后回答不是先铺垫，而是先给结论。",
+        importance=4,
+        source="conversation",
+        user_id="alice",
+    )
+
+    assert result.action == "revise"
+    assert result.result_memory_id is not None
+    assert indexer.remove_calls == [result.target_memory_id]
+
+
+def test_evolve_memory_keeps_sqlite_result_when_vector_indexing_fails(tmp_path):
+    indexer = TrackingVectorIndexer(fail=True)
+    store = SqliteSemanticMemoryStore(tmp_path / "agent.db", vector_indexer=indexer)
+
+    result = store.evolve_memory(
+        category="fact",
+        content="用户正在搭建一个持续学习 agent。",
+        importance=4,
+        source="conversation",
+        user_id="alice",
+    )
+
+    assert result.action == "add"
+    assert result.result_memory_id is not None
+    assert store.recent_memories(user_id="alice", limit=10)[0].id == result.result_memory_id
+    assert len(indexer.calls) == 1
+
+
+def test_evolve_memory_revises_existing_preference_on_preference_shift(tmp_path):
+    store = MemoryStore(tmp_path / "agent.db")
+    repository = store.semantic_store.repository
+    repository.insert_memory(
+        user_id="alice",
+        category="preference",
+        content="用户喜欢先铺垫后给结论。",
+        importance=3,
+        source="conversation",
+        created_at="2026-07-06T00:00:00+00:00",
+    )
+    old_id = store.recent_memories(user_id="alice", limit=1)[0].id
+
+    result = store.semantic_store.evolve_memory(
+        category="preference",
+        content="我现在更喜欢先给结论。",
+        importance=4,
+        source="conversation",
+        user_id="alice",
+    )
+    all_memories = store.semantic_store.repository.list_memories("alice")
+
+    assert result.action == "revise"
+    assert result.reason == "preference_shift"
+    assert result.target_memory_id == old_id
+    assert result.result_memory_id is not None
+    assert any(row["id"] == old_id and row["status"] == "superseded" for row in all_memories)
+
+
+def test_evolve_memory_revises_existing_fact_on_fact_correction(tmp_path):
+    store = MemoryStore(tmp_path / "agent.db")
+    repository = store.semantic_store.repository
+    repository.insert_memory(
+        user_id="alice",
+        category="fact",
+        content="用户出生在北京。",
+        importance=4,
+        source="conversation",
+        created_at="2026-07-06T00:00:00+00:00",
+    )
+    old_id = store.recent_memories(user_id="alice", limit=1)[0].id
+
+    result = store.semantic_store.evolve_memory(
+        category="fact",
+        content="用户出生在上海。",
+        importance=4,
+        source="conversation",
+        user_id="alice",
+    )
+    all_memories = store.semantic_store.repository.list_memories("alice")
+
+    assert result.action == "revise"
+    assert result.reason == "fact_correction"
+    assert result.target_memory_id == old_id
+    assert result.result_memory_id is not None
+    assert any(row["id"] == old_id and row["status"] == "superseded" for row in all_memories)
+
+
+def test_evolve_memory_adds_contextual_preference_without_superseding_global_preference(tmp_path):
+    store = MemoryStore(tmp_path / "agent.db")
+    repository = store.semantic_store.repository
+    repository.insert_memory(
+        user_id="alice",
+        category="preference",
+        content="用户喜欢先铺垫后给结论。",
+        importance=3,
+        source="conversation",
+        created_at="2026-07-06T00:00:00+00:00",
+    )
+    old_id = store.recent_memories(user_id="alice", limit=1)[0].id
+
+    result = store.semantic_store.evolve_memory(
+        category="preference",
+        content="写代码时我现在更喜欢先给结论。",
+        importance=4,
+        source="conversation",
+        user_id="alice",
+    )
+    all_memories = store.semantic_store.repository.list_memories("alice")
+
+    assert result.action == "add"
+    assert result.reason == "new_memory"
+    assert result.target_memory_id is None
+    assert result.result_memory_id is not None
+    assert any(row["id"] == old_id and row["status"] == "active" for row in all_memories)
 
 
 def test_evolve_memory_ignores_low_value_candidate(tmp_path):
@@ -158,6 +594,22 @@ def test_evolve_memory_ignores_low_value_candidate(tmp_path):
     )
 
     assert result.action == "ignore"
+    assert store.recent_memories(user_id="alice", limit=10) == []
+
+
+def test_evolve_memory_ignores_weak_signal_candidate_even_if_long_enough(tmp_path):
+    store = MemoryStore(tmp_path / "agent.db")
+
+    result = store.semantic_store.evolve_memory(
+        category="general",
+        content="哈哈哈哈",
+        importance=1,
+        source="conversation",
+        user_id="alice",
+    )
+
+    assert result.action == "ignore"
+    assert result.reason == "low_value"
     assert store.recent_memories(user_id="alice", limit=10) == []
 
 
@@ -270,6 +722,52 @@ def test_delete_memory_only_deletes_current_users_item(tmp_path):
     assert [item.content for item in store.search_memories("回答偏好", user_id="bob", limit=5)] == [
         "Bob 喜欢先给结论。"
     ]
+
+
+def test_delete_memory_removes_vector_when_vector_indexer_is_configured(tmp_path):
+    indexer = TrackingVectorIndexer()
+    store = SqliteSemanticMemoryStore(tmp_path / "agent.db", vector_indexer=indexer)
+    store.repository.insert_memory(
+        user_id="alice",
+        category="preference",
+        content="Alice 喜欢先给结论。",
+        importance=4,
+        source="test",
+        created_at="2026-07-06T00:00:00+00:00",
+    )
+    memory_id = store.recent_memories(user_id="alice", limit=1)[0].id
+
+    deleted = store.delete_memory(memory_id, user_id="alice")
+
+    assert deleted is True
+    assert indexer.remove_calls == [memory_id]
+
+
+def test_dedupe_memories_removes_deleted_vectors_when_vector_indexer_is_configured(tmp_path):
+    indexer = TrackingVectorIndexer()
+    store = SqliteSemanticMemoryStore(tmp_path / "agent.db", vector_indexer=indexer)
+    store.repository.insert_memory(
+        user_id="alice",
+        category="preference",
+        content="用户要求交流时先给出结论，再补充原因。",
+        importance=5,
+        source="test",
+        created_at="2026-07-04T00:00:00+00:00",
+    )
+    store.repository.insert_memory(
+        user_id="alice",
+        category="preference",
+        content="用户偏好回答结构：先给结论，再补充原因。",
+        importance=4,
+        source="test",
+        created_at="2026-07-04T00:01:00+00:00",
+    )
+    deleted_memory_id = store.recent_memories(user_id="alice", limit=2)[0].id
+
+    removed = store.dedupe_memories(user_id="alice")
+
+    assert removed == DedupeResult(removed_count=1, removed_ids=[deleted_memory_id], kept_ids=[1])
+    assert indexer.remove_calls == [deleted_memory_id]
 
 
 def test_messages_redact_api_keys_before_storage(tmp_path):

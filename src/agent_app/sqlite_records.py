@@ -392,6 +392,7 @@ class SqliteAuditRepository:
         *,
         thread_id: str | None = None,
         action: str | None = None,
+        reason: str | None = None,
     ) -> list["MemoryEvolutionEvent"]:
         from .memory import MemoryEvolutionEvent
 
@@ -403,6 +404,9 @@ class SqliteAuditRepository:
         if action is not None:
             clauses.append("action = ?")
             params.append(action)
+        if reason is not None:
+            clauses.append("reason = ?")
+            params.append(reason)
         with self._connect() as conn:
             rows = conn.execute(
                 f"""

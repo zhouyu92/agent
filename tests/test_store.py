@@ -126,6 +126,43 @@ def test_sqlite_audit_store_round_trips_memory_evolution_events(tmp_path):
     assert event.result_memory_id == 3
 
 
+def test_sqlite_audit_store_filters_memory_evolution_events_by_reason(tmp_path):
+    memory = MemoryStore(tmp_path / "agent.db")
+    store = SqliteAuditStore(memory)
+
+    store.add_memory_evolution_event(
+        user_id="alice",
+        thread_id="t1",
+        action="ignore",
+        candidate_category="preference",
+        candidate_content="用户偏好回答时先给结论。",
+        target_memory_id=3,
+        result_memory_id=None,
+        reason="no_new_information",
+    )
+    store.add_memory_evolution_event(
+        user_id="alice",
+        thread_id="t1",
+        action="revise",
+        candidate_category="preference",
+        candidate_content="以后回答先给结论。",
+        target_memory_id=3,
+        result_memory_id=4,
+        reason="correction_phrase",
+    )
+
+    events = store.recent_memory_evolution_events(
+        user_id="alice",
+        limit=10,
+        thread_id="t1",
+        reason="no_new_information",
+    )
+
+    assert len(events) == 1
+    assert events[0].action == "ignore"
+    assert events[0].reason == "no_new_information"
+
+
 def test_sqlite_long_term_store_matches_split_store_protocols(tmp_path):
     memory = MemoryStore(tmp_path / "agent.db")
     store = SqliteLongTermStore(memory)
@@ -364,23 +401,39 @@ def test_sqlite_cli_store_delegates_memory_listing_and_delete_to_semantic_adapte
         calls.append(("delete_memory", memory_id, user_id))
         return MemoryStore(tmp_path / "agent.db").delete_memory(memory_id, user_id=user_id)
 
+    def track_confirm_memory(memory_id: int, user_id: str = "default"):
+        calls.append(("confirm_memory", memory_id, user_id))
+        return True
+
+    def track_archive_memory(memory_id: int, user_id: str = "default"):
+        calls.append(("archive_memory", memory_id, user_id))
+        return True
+
     def track_dedupe_memories(user_id: str = "default"):
         calls.append(("dedupe_memories", user_id))
         return DedupeResult(removed_count=1, removed_ids=[memory_id], kept_ids=[1])
 
     cli_store.long_term_store.semantic_memory_store.recent_memories = track_recent_memories  # type: ignore[method-assign]
     cli_store.long_term_store.semantic_memory_store.delete_memory = track_delete_memory  # type: ignore[method-assign]
+    cli_store.long_term_store.semantic_memory_store.confirm_memory = track_confirm_memory  # type: ignore[method-assign]
+    cli_store.long_term_store.semantic_memory_store.archive_memory = track_archive_memory  # type: ignore[method-assign]
     cli_store.long_term_store.semantic_memory_store.dedupe_memories = track_dedupe_memories  # type: ignore[method-assign]
 
     recent = cli_store.recent_memories(limit=3, user_id="alice")
+    confirmed = cli_store.confirm_memory(memory_id, user_id="alice")
+    archived = cli_store.archive_memory(memory_id, user_id="alice")
     deleted = cli_store.delete_memory(memory_id, user_id="alice")
     deduped = cli_store.dedupe_memories(user_id="alice")
 
     assert recent[0].content == "用户喜欢先给结论再补充原因。"
+    assert confirmed is True
+    assert archived is True
     assert deleted is True
     assert deduped == DedupeResult(removed_count=1, removed_ids=[memory_id], kept_ids=[1])
     assert calls == [
         ("recent_memories", 3, "alice"),
+        ("confirm_memory", memory_id, "alice"),
+        ("archive_memory", memory_id, "alice"),
         ("delete_memory", memory_id, "alice"),
         ("dedupe_memories", "alice"),
     ]

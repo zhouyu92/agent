@@ -46,12 +46,13 @@ def format_audit_timeline(
         )
     for event in learning_events:
         fields = ",".join(event.profile_fields) if event.profile_fields else "none"
+        outcome = _learning_outcome_label(event)
         preview = event.user_text.replace("\n", " ")[:60]
         timeline.append(
             (
                 event.created_at,
                 "learning",
-                f"learning memories={event.memory_count} profile={fields} user={preview}",
+                f"learning memories={event.memory_count} outcome={outcome} profile={fields} user={preview}",
             )
         )
     for event in dedupe_events:
@@ -71,11 +72,14 @@ def format_audit_timeline(
             continue
         target_memory_id = event.target_memory_id if event.target_memory_id is not None else "none"
         result_memory_id = event.result_memory_id if event.result_memory_id is not None else "none"
+        candidate_preview = event.candidate_content.replace("\n", " ")[:80]
         timeline.append(
             (
                 event.created_at,
                 "memory_evolution",
-                f"memory_evolution {event.action} target={target_memory_id} result={result_memory_id} reason={event.reason}",
+                f"memory_evolution {event.action} category={event.candidate_category} "
+                f"target={target_memory_id} result={result_memory_id} reason={event.reason} "
+                f"candidate={candidate_preview}",
             )
         )
 
@@ -85,6 +89,18 @@ def format_audit_timeline(
     lines = [f"Thread audit: {thread_id}"]
     lines.extend(f"- [{created_at}] {content}" for created_at, _, content in timeline)
     return "\n".join(lines)
+
+
+def _learning_outcome_label(event: LearningEvent) -> str:
+    has_memories = event.memory_count > 0
+    has_profile_updates = bool(event.profile_fields)
+    if has_memories and has_profile_updates:
+        return "memory+profile"
+    if has_memories:
+        return "memory_only"
+    if has_profile_updates:
+        return "profile_only"
+    return "no_change"
 
 
 def format_checkpoint_messages(
