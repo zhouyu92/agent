@@ -111,6 +111,17 @@ def test_agent_learns_after_reply_and_uses_memory_next_turn(tmp_path):
     assert "用户喜欢先给结论再解释。" in second_chat_messages[0]["content"]
 
 
+def test_agent_injects_thread_summary_into_system_prompt(tmp_path):
+    config = AgentConfig(api_key="test-key", base_url="https://example.test/compatible-mode/v1", memory_db_path=tmp_path / "agent.db")
+    memory = MemoryStore(config.memory_db_path)
+    memory.update_thread_summary("t-summary", "用户正在规划一个长期记忆 agent。", user_id="alice")
+    model = FakeModel()
+
+    ConversationalAgent(config, memory, model).reply("请继续。", thread_id="t-summary", user_id="alice")
+
+    assert "用户正在规划一个长期记忆 agent。" in model.calls[0]["messages"][0]["content"]
+
+
 def test_agent_reflects_unreviewed_learning_events_once(tmp_path):
     config = AgentConfig(
         api_key="test-key",

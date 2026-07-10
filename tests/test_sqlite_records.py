@@ -75,3 +75,14 @@ def test_sqlite_transcript_repository_writes_and_reads_messages(tmp_path):
         ("user", "你好"),
         ("assistant", "你好，我在。"),
     ]
+
+
+def test_sqlite_transcript_repository_stores_user_scoped_thread_summary(tmp_path):
+    db_path = tmp_path / "agent.db"
+    ensure_sqlite_schema(db_path)
+    repo = SqliteTranscriptRepository(db_path)
+    repo.update_thread_summary("t1", "Alice 的摘要", user_id="alice")
+    repo.update_thread_summary("t1", "Bob 的摘要", user_id="bob")
+
+    assert repo.get_thread_summary("t1", user_id="alice") == "Alice 的摘要"
+    assert repo.get_thread_summary("t1", user_id="bob") == "Bob 的摘要"

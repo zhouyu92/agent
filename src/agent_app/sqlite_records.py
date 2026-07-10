@@ -511,6 +511,15 @@ class SqliteTranscriptRepository:
         conn.row_factory = sqlite3.Row
         return conn
 
+    def get_thread_summary(self, thread_id: str, user_id: str = "default") -> str | None:
+        with self._connect() as conn:
+            row = conn.execute("SELECT summary FROM thread_summaries WHERE user_id = ? AND thread_id = ?", (clean_user_id(user_id), thread_id)).fetchone()
+        return row["summary"] if row else None
+
+    def update_thread_summary(self, thread_id: str, summary: str, user_id: str = "default") -> None:
+        with self._connect() as conn:
+            conn.execute("INSERT INTO thread_summaries (user_id, thread_id, summary, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(user_id, thread_id) DO UPDATE SET summary = excluded.summary, updated_at = excluded.updated_at", (clean_user_id(user_id), thread_id, redact_sensitive(summary), now_iso()))
+
     def add_message(self, thread_id: str, role: str, content: str) -> None:
         with self._connect() as conn:
             conn.execute(

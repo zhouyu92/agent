@@ -324,6 +324,30 @@ def test_langgraph_agent_persists_thread_messages_and_long_term_memory(tmp_path)
     ]
 
 
+def test_langgraph_agent_limits_prompt_history_without_truncating_checkpoint(tmp_path):
+    config = AgentConfig(
+        api_key="test-key",
+        base_url="https://example.test/compatible-mode/v1",
+        memory_db_path=tmp_path / "agent.db",
+        checkpoint_db_path=tmp_path / "checkpoints.db",
+        backend="langgraph",
+        max_recent_turns=1,
+    )
+    model = FakeGraphModel()
+    agent = LangGraphAgent(config, MemoryStore(config.memory_db_path), model=model)
+
+    agent.reply("第一轮需要学习。", thread_id="t-window", user_id="alice")
+    agent.reply("第二轮需要学习。", thread_id="t-window", user_id="alice")
+    agent.reply("第三轮需要学习。", thread_id="t-window", user_id="alice")
+
+    prompt_messages = model.calls[-1]
+    checkpoint_messages = agent.get_thread_messages("t-window", user_id="alice")
+    assert len(prompt_messages) == 3
+    assert [message.content for message in prompt_messages[1:]] == ["好的，我之后会先给结论再补充原因。", "第三轮需要学习。"]
+    assert len(checkpoint_messages) == 6
+    agent.close()
+
+
 def test_langgraph_agent_stores_retrieved_memories_in_graph_state(tmp_path):
     config = AgentConfig(
         api_key="test-key",

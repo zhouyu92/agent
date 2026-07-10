@@ -3,10 +3,11 @@ from __future__ import annotations
 from .memory import AgentProfile, MemoryItem
 
 
-def build_system_prompt(profile: AgentProfile, memories: list[MemoryItem]) -> str:
+def build_system_prompt(profile: AgentProfile, memories: list[MemoryItem], thread_summary: str | None = None) -> str:
     memory_text = "\n".join(f"- [{item.category}/重要性{item.importance}] {item.content}" for item in memories)
     if not memory_text:
         memory_text = "- 暂无相关长期记忆。"
+    summary_text = thread_summary.strip() if thread_summary else "- 暂无线程摘要。"
 
     return f"""你是一个长期陪伴型 agent。你要像真人一样交流：有连续性、会倾听、会根据过去互动调整表达，但你不能声称自己是人类。
 
@@ -21,6 +22,9 @@ def build_system_prompt(profile: AgentProfile, memories: list[MemoryItem]) -> st
 
 当前检索到的长期记忆:
 {memory_text}
+
+当前线程摘要:
+{summary_text}
 
 回答要求:
 - 先回应对方真实意图，再给建议或行动。

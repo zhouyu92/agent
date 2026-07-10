@@ -233,6 +233,12 @@ class SqliteTranscriptStore:
     def add_message(self, thread_id: str, role: str, content: str) -> None:
         self.repository.add_message(thread_id, role, content)
 
+    def get_thread_summary(self, thread_id: str, user_id: str = "default") -> str | None:
+        return self.repository.get_thread_summary(thread_id, user_id=user_id)
+
+    def update_thread_summary(self, thread_id: str, summary: str, user_id: str = "default") -> None:
+        self.repository.update_thread_summary(thread_id, summary, user_id=user_id)
+
     def recent_messages(self, thread_id: str, limit: int) -> list[dict[str, str]]:
         return self.repository.recent_messages(thread_id, limit)
 

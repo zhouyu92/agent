@@ -39,6 +39,17 @@ def ensure_sqlite_schema(db_path: str | Path) -> None:
         )
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS thread_summaries (
+                user_id TEXT NOT NULL,
+                thread_id TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (user_id, thread_id)
+            )
+            """
+        )
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS agent_profile (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 identity TEXT NOT NULL,

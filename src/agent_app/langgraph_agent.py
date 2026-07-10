@@ -200,6 +200,8 @@ class LangGraphAgent:
         }
 
     def _respond_node(self, state: LangGraphState, config) -> dict[str, list[AIMessage]]:
+        thread_id = config["configurable"].get("thread_id", "default")
+        user_id = config["configurable"].get("user_id", "default")
         relevant_memories = [
             MemoryItem(
                 id=0,
@@ -211,8 +213,11 @@ class LangGraphAgent:
             )
             for item in state.get("retrieved_memories", [])
         ]
-        system_prompt = build_system_prompt(self.profile_store.get_profile(), relevant_memories)
-        prompt_messages = [SystemMessage(content=system_prompt), *state["messages"]]
+        get_thread_summary = getattr(self.transcript_store, "get_thread_summary", None)
+        thread_summary = get_thread_summary(thread_id, user_id=user_id) if get_thread_summary else None
+        system_prompt = build_system_prompt(self.profile_store.get_profile(), relevant_memories, thread_summary)
+        prompt_limit = self.config.max_recent_turns * 2
+        prompt_messages = [SystemMessage(content=system_prompt), *state["messages"][-prompt_limit:]]
         response = self.model.invoke(prompt_messages)
         ai_message = response if isinstance(response, AIMessage) else AIMessage(content=str(response))
         return {"messages": [ai_message]}

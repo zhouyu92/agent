@@ -69,7 +69,8 @@ class ConversationalAgent:
             )
         profile = self.memory.get_profile()
         recent = self.memory.recent_messages(thread_id, self.config.max_recent_turns * 2)
-        messages = [{"role": "system", "content": build_system_prompt(profile, relevant_memories)}]
+        thread_summary = self.memory.get_thread_summary(thread_id, user_id=user_id)
+        messages = [{"role": "system", "content": build_system_prompt(profile, relevant_memories, thread_summary)}]
         messages.extend(recent)
         messages.append({"role": "user", "content": user_text})
 
