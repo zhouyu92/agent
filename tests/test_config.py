@@ -12,6 +12,7 @@ def test_config_builds_beijing_base_url_from_workspace_id(monkeypatch):
     monkeypatch.setenv("AGENT_BACKEND", "langgraph")
     monkeypatch.setenv("AGENT_CHECKPOINT_DB", "data/lg-checkpoints.db")
     monkeypatch.setenv("AGENT_REFLECTION_INTERVAL", "3")
+    monkeypatch.setenv("AGENT_SUMMARY_INTERVAL", "4")
     monkeypatch.delenv("DASHSCOPE_BASE_URL", raising=False)
 
     config = AgentConfig.from_env()
@@ -23,6 +24,7 @@ def test_config_builds_beijing_base_url_from_workspace_id(monkeypatch):
     assert config.backend == "langgraph"
     assert str(config.checkpoint_db_path).endswith("data\\lg-checkpoints.db")
     assert config.reflection_interval == 3
+    assert config.summary_interval == 4
 
 
 def test_config_rejects_reflection_interval_of_one(monkeypatch):
@@ -32,6 +34,16 @@ def test_config_rejects_reflection_interval_of_one(monkeypatch):
     monkeypatch.delenv("DASHSCOPE_BASE_URL", raising=False)
 
     with pytest.raises(ValueError, match="AGENT_REFLECTION_INTERVAL"):
+        AgentConfig.from_env()
+
+
+def test_config_rejects_summary_interval_of_one(monkeypatch):
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "test-key")
+    monkeypatch.setenv("DASHSCOPE_WORKSPACE_ID", "ws-123")
+    monkeypatch.setenv("AGENT_SUMMARY_INTERVAL", "1")
+    monkeypatch.delenv("DASHSCOPE_BASE_URL", raising=False)
+
+    with pytest.raises(ValueError, match="AGENT_SUMMARY_INTERVAL"):
         AgentConfig.from_env()
 
 

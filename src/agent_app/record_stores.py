@@ -236,11 +236,23 @@ class SqliteTranscriptStore:
     def get_thread_summary(self, thread_id: str, user_id: str = "default") -> str | None:
         return self.repository.get_thread_summary(thread_id, user_id=user_id)
 
-    def update_thread_summary(self, thread_id: str, summary: str, user_id: str = "default") -> None:
-        self.repository.update_thread_summary(thread_id, summary, user_id=user_id)
+    def get_thread_summary_last_message_id(self, thread_id: str, user_id: str = "default") -> int:
+        return self.repository.get_thread_summary_last_message_id(thread_id, user_id=user_id)
+
+    def update_thread_summary(
+        self,
+        thread_id: str,
+        summary: str,
+        user_id: str = "default",
+        last_message_id: int = 0,
+    ) -> None:
+        self.repository.update_thread_summary(thread_id, summary, user_id=user_id, last_message_id=last_message_id)
 
     def recent_messages(self, thread_id: str, limit: int) -> list[dict[str, str]]:
         return self.repository.recent_messages(thread_id, limit)
 
     def thread_messages(self, thread_id: str, limit: int = 50) -> list["ThreadMessage"]:
         return self.repository.thread_messages(thread_id, limit=limit)
+
+    def thread_messages_after(self, thread_id: str, message_id: int) -> list["ThreadMessage"]:
+        return self.repository.thread_messages_after(thread_id, message_id)

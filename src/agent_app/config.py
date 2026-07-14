@@ -23,6 +23,7 @@ class AgentConfig:
     zilliz_token: str | None = None
     zilliz_collection_name: str = "zy_test_agent"
     reflection_interval: int = 0
+    summary_interval: int = 0
 
     @classmethod
     def from_env(cls) -> "AgentConfig":
@@ -42,6 +43,9 @@ class AgentConfig:
         reflection_interval = int(os.getenv("AGENT_REFLECTION_INTERVAL", "0"))
         if reflection_interval != 0 and reflection_interval < 2:
             raise ValueError("AGENT_REFLECTION_INTERVAL must be 0 or at least 2.")
+        summary_interval = int(os.getenv("AGENT_SUMMARY_INTERVAL", "0"))
+        if summary_interval != 0 and summary_interval < 2:
+            raise ValueError("AGENT_SUMMARY_INTERVAL must be 0 or at least 2.")
 
         return cls(
             api_key=api_key,
@@ -58,4 +62,5 @@ class AgentConfig:
             zilliz_token=os.getenv("ZILLIZ_TOKEN") or None,
             zilliz_collection_name=os.getenv("ZILLIZ_COLLECTION_NAME", "zy_test_agent"),
             reflection_interval=reflection_interval,
+            summary_interval=summary_interval,
         )

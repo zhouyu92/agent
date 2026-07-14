@@ -43,6 +43,7 @@ def ensure_sqlite_schema(db_path: str | Path) -> None:
                 user_id TEXT NOT NULL,
                 thread_id TEXT NOT NULL,
                 summary TEXT NOT NULL,
+                last_message_id INTEGER NOT NULL DEFAULT 0,
                 updated_at TEXT NOT NULL,
                 PRIMARY KEY (user_id, thread_id)
             )
@@ -175,6 +176,7 @@ def ensure_sqlite_schema(db_path: str | Path) -> None:
         _ensure_column(conn, "retrieval_events", "memory_ids", "TEXT NOT NULL DEFAULT ''")
         _ensure_column(conn, "dedupe_events", "thread_id", "TEXT")
         _ensure_column(conn, "dedupe_events", "kept_ids", "TEXT NOT NULL DEFAULT ''")
+        _ensure_column(conn, "thread_summaries", "last_message_id", "INTEGER NOT NULL DEFAULT 0")
         conn.commit()
     finally:
         conn.close()

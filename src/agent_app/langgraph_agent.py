@@ -112,6 +112,7 @@ class LangGraphAgent:
         final_message = result["messages"][-1]
         assistant_text = final_message.content if isinstance(final_message, AIMessage) else str(final_message)
         self.thread_state_store.record_turn(thread_id, user_text, assistant_text)
+        self._maybe_summarize_thread(thread_id=thread_id, user_id=user_id)
         return assistant_text
 
     def get_thread_messages(self, thread_id: str, user_id: str = "default") -> list[BaseMessage]:
@@ -140,16 +141,38 @@ class LangGraphAgent:
         if self.transcript_store is None:
             return None
         messages = self.transcript_store.thread_messages(thread_id, limit=100)
-        update_summary = getattr(self.transcript_store, "update_thread_summary", None)
-        if not messages or update_summary is None:
+        if not messages:
             return None
+        return self._summarize_messages(thread_id, user_id, messages)
+
+    def _maybe_summarize_thread(self, thread_id: str, user_id: str) -> str | None:
+        if self.config.summary_interval < 2 or self.transcript_store is None:
+            return None
+        get_last_message_id = getattr(self.transcript_store, "get_thread_summary_last_message_id", None)
+        get_messages_after = getattr(self.transcript_store, "thread_messages_after", None)
+        if get_last_message_id is None or get_messages_after is None:
+            return None
+        messages = get_messages_after(thread_id, get_last_message_id(thread_id, user_id=user_id))
+        if len(messages) < self.config.summary_interval * 2:
+            return None
+        return self._summarize_messages(thread_id, user_id, messages)
+
+    def _summarize_messages(self, thread_id: str, user_id: str, messages) -> str | None:
+        if self.transcript_store is None:
+            return None
+        update_summary = getattr(self.transcript_store, "update_thread_summary", None)
+        if update_summary is None:
+            return None
+        get_summary = getattr(self.transcript_store, "get_thread_summary", None)
+        previous_summary = get_summary(thread_id, user_id=user_id) if get_summary else None
         transcript = "\n".join(f"{message.role}: {message.content}" for message in messages)
+        summary_input = f"既有摘要:\n{previous_summary or '（无）'}\n\n新增对话:\n{transcript}"
         raw = self.model.invoke(
-            [{"role": "system", "content": THREAD_SUMMARY_PROMPT}, {"role": "user", "content": transcript}]
+            [{"role": "system", "content": THREAD_SUMMARY_PROMPT}, {"role": "user", "content": summary_input}]
         )
         summary = (raw.content if isinstance(raw, AIMessage) else str(raw)).strip()
         if summary:
-            update_summary(thread_id, summary, user_id=user_id)
+            update_summary(thread_id, summary, user_id=user_id, last_message_id=messages[-1].id)
         return summary or None
 
     def reflect(

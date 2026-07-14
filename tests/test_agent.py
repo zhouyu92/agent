@@ -60,6 +60,19 @@ class ReflectionModel:
         """
 
 
+class SummaryModel:
+    def __init__(self):
+        self.calls = []
+
+    def chat(self, messages, temperature=0.7):
+        self.calls.append({"messages": messages, "temperature": temperature})
+        if messages[0]["content"].startswith("请将以下对话压缩"):
+            return "用户正在推进长期记忆 agent，下一步是测试自动摘要。"
+        if temperature == 0.0:
+            return '{"memories": [], "profile_updates": {}}'
+        return "收到。"
+
+
 def test_parse_learning_update_accepts_json_inside_markdown_fence():
     raw = """
     ```json
@@ -132,6 +145,27 @@ def test_agent_summarizes_thread_and_persists_result(tmp_path):
 
     assert summary is not None
     assert memory.get_thread_summary("t-summary", user_id="alice") == summary
+
+
+def test_agent_automatically_summarizes_new_complete_turns(tmp_path):
+    config = AgentConfig(
+        api_key="test-key",
+        base_url="https://example.test/compatible-mode/v1",
+        memory_db_path=tmp_path / "agent.db",
+        summary_interval=2,
+    )
+    memory = MemoryStore(config.memory_db_path)
+    model = SummaryModel()
+    agent = ConversationalAgent(config, memory, model)
+
+    agent.reply("第一轮讨论自动摘要。", thread_id="t-summary", user_id="alice")
+    assert memory.get_thread_summary("t-summary", user_id="alice") is None
+    agent.reply("第二轮继续讨论自动摘要。", thread_id="t-summary", user_id="alice")
+
+    assert memory.get_thread_summary("t-summary", user_id="alice") == "用户正在推进长期记忆 agent，下一步是测试自动摘要。"
+    assert memory.get_thread_summary_last_message_id("t-summary", user_id="alice") == memory.thread_messages("t-summary", limit=10)[-1].id
+    summary_calls = [call for call in model.calls if call["messages"][0]["content"].startswith("请将以下对话压缩")]
+    assert len(summary_calls) == 1
 
 
 def test_agent_reflects_unreviewed_learning_events_once(tmp_path):

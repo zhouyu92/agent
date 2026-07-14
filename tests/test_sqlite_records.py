@@ -86,3 +86,18 @@ def test_sqlite_transcript_repository_stores_user_scoped_thread_summary(tmp_path
 
     assert repo.get_thread_summary("t1", user_id="alice") == "Alice 的摘要"
     assert repo.get_thread_summary("t1", user_id="bob") == "Bob 的摘要"
+
+
+def test_sqlite_transcript_repository_tracks_summary_message_cursor(tmp_path):
+    db_path = tmp_path / "agent.db"
+    ensure_sqlite_schema(db_path)
+    repo = SqliteTranscriptRepository(db_path)
+    repo.add_message("t1", "user", "第一轮")
+    repo.add_message("t1", "assistant", "收到")
+    messages = repo.thread_messages("t1", limit=10)
+
+    repo.update_thread_summary("t1", "已总结第一轮", user_id="alice", last_message_id=messages[-1].id)
+    repo.add_message("t1", "user", "第二轮")
+
+    assert repo.get_thread_summary_last_message_id("t1", user_id="alice") == messages[-1].id
+    assert [(message.role, message.content) for message in repo.thread_messages_after("t1", messages[-1].id)] == [("user", "第二轮")]

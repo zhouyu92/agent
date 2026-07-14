@@ -79,6 +79,7 @@ class ConversationalAgent:
         self.memory.add_message(thread_id, "assistant", assistant_text)
         if decision.should_learn:
             self._learn_from_turn(user_text, assistant_text, thread_id=thread_id, user_id=user_id)
+        self._maybe_summarize_thread(thread_id=thread_id, user_id=user_id)
         return assistant_text
 
     def _learn_from_turn(self, user_text: str, assistant_text: str, thread_id: str, user_id: str) -> None:
@@ -148,10 +149,28 @@ class ConversationalAgent:
         messages = self.memory.thread_messages(thread_id, limit=100)
         if not messages:
             return None
+        summary = self._summarize_messages(thread_id, user_id, messages)
+        return summary
+
+    def _maybe_summarize_thread(self, thread_id: str, user_id: str) -> str | None:
+        if self.config.summary_interval < 2:
+            return None
+        last_message_id = self.memory.get_thread_summary_last_message_id(thread_id, user_id=user_id)
+        messages = self.memory.thread_messages_after(thread_id, last_message_id)
+        if len(messages) < self.config.summary_interval * 2:
+            return None
+        return self._summarize_messages(thread_id, user_id, messages)
+
+    def _summarize_messages(self, thread_id: str, user_id: str, messages) -> str | None:
         transcript = "\n".join(f"{message.role}: {message.content}" for message in messages)
-        summary = self.model.chat([{"role": "system", "content": THREAD_SUMMARY_PROMPT}, {"role": "user", "content": transcript}], temperature=0.0).strip()
+        previous_summary = self.memory.get_thread_summary(thread_id, user_id=user_id) or "（无）"
+        summary_input = f"既有摘要:\n{previous_summary}\n\n新增对话:\n{transcript}"
+        summary = self.model.chat(
+            [{"role": "system", "content": THREAD_SUMMARY_PROMPT}, {"role": "user", "content": summary_input}],
+            temperature=0.0,
+        ).strip()
         if summary:
-            self.memory.update_thread_summary(thread_id, summary, user_id=user_id)
+            self.memory.update_thread_summary(thread_id, summary, user_id=user_id, last_message_id=messages[-1].id)
         return summary or None
 
 

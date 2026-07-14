@@ -362,6 +362,30 @@ def test_langgraph_agent_summarizes_thread_and_persists_result(tmp_path):
     agent.close()
 
 
+def test_langgraph_agent_automatically_summarizes_new_complete_turns(tmp_path):
+    config = AgentConfig(
+        api_key="test-key",
+        base_url="https://example.test/compatible-mode/v1",
+        memory_db_path=tmp_path / "agent.db",
+        checkpoint_db_path=tmp_path / "checkpoints.db",
+        backend="langgraph",
+        summary_interval=2,
+    )
+    memory = MemoryStore(config.memory_db_path)
+    model = FakeGraphModel()
+    agent = LangGraphAgent(config, memory, model=model)
+
+    agent.reply("第一轮讨论自动摘要。", thread_id="t-summary", user_id="alice")
+    assert memory.get_thread_summary("t-summary", user_id="alice") is None
+    agent.reply("第二轮继续讨论自动摘要。", thread_id="t-summary", user_id="alice")
+
+    assert memory.get_thread_summary("t-summary", user_id="alice") is not None
+    assert memory.get_thread_summary_last_message_id("t-summary", user_id="alice") == memory.thread_messages("t-summary", limit=10)[-1].id
+    summary_calls = [call for call in model.calls if isinstance(call[0], dict) and call[0]["content"].startswith("请将以下对话压缩")]
+    assert len(summary_calls) == 1
+    agent.close()
+
+
 def test_langgraph_agent_stores_retrieved_memories_in_graph_state(tmp_path):
     config = AgentConfig(
         api_key="test-key",

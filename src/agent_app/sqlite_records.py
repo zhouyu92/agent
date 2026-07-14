@@ -516,9 +516,24 @@ class SqliteTranscriptRepository:
             row = conn.execute("SELECT summary FROM thread_summaries WHERE user_id = ? AND thread_id = ?", (clean_user_id(user_id), thread_id)).fetchone()
         return row["summary"] if row else None
 
-    def update_thread_summary(self, thread_id: str, summary: str, user_id: str = "default") -> None:
+    def get_thread_summary_last_message_id(self, thread_id: str, user_id: str = "default") -> int:
         with self._connect() as conn:
-            conn.execute("INSERT INTO thread_summaries (user_id, thread_id, summary, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(user_id, thread_id) DO UPDATE SET summary = excluded.summary, updated_at = excluded.updated_at", (clean_user_id(user_id), thread_id, redact_sensitive(summary), now_iso()))
+            row = conn.execute("SELECT last_message_id FROM thread_summaries WHERE user_id = ? AND thread_id = ?", (clean_user_id(user_id), thread_id)).fetchone()
+        return int(row["last_message_id"]) if row else 0
+
+    def update_thread_summary(
+        self,
+        thread_id: str,
+        summary: str,
+        user_id: str = "default",
+        last_message_id: int = 0,
+    ) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO thread_summaries (user_id, thread_id, summary, last_message_id, updated_at) VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(user_id, thread_id) DO UPDATE SET summary = excluded.summary, last_message_id = excluded.last_message_id, updated_at = excluded.updated_at",
+                (clean_user_id(user_id), thread_id, redact_sensitive(summary), last_message_id, now_iso()),
+            )
 
     def add_message(self, thread_id: str, role: str, content: str) -> None:
         with self._connect() as conn:
@@ -556,6 +571,25 @@ class SqliteTranscriptRepository:
                 LIMIT ?
                 """,
                 (thread_id, limit),
+            ).fetchall()
+        return [
+            ThreadMessage(
+                id=row["id"],
+                thread_id=row["thread_id"],
+                role=row["role"],
+                content=row["content"],
+                created_at=row["created_at"],
+            )
+            for row in rows
+        ]
+
+    def thread_messages_after(self, thread_id: str, message_id: int) -> list["ThreadMessage"]:
+        from .memory import ThreadMessage
+
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT id, thread_id, role, content, created_at FROM messages WHERE thread_id = ? AND id > ? ORDER BY id ASC",
+                (thread_id, message_id),
             ).fetchall()
         return [
             ThreadMessage(
